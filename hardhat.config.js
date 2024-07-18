@@ -1,10 +1,29 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("@tenderly/hardhat-tenderly");
 require('dotenv').config();
+require("@nomicfoundation/hardhat-ethers");
 
 module.exports = {
   solidity: {
     compilers: [
+      {
+        version: "0.5.0",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
+      {
+        version: "0.6.0",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
       {
         version: "0.7.0",
         settings: {
@@ -15,7 +34,34 @@ module.exports = {
         },
       },
       {
+        version: "0.7.5",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
+      {
         version: "0.8.0",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
+      {
+        version: "0.8.19",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
+      {
+        version: "0.8.20",
         settings: {
           optimizer: {
             enabled: true,
@@ -44,5 +90,11 @@ module.exports = {
   tenderly: {
     project: "irobotv2",
     username: "Irobotv2noip",
+  },
+  paths: {
+    sources: "./contracts",
+    tests: "./test",
+    cache: "./cache",
+    artifacts: "./artifacts"
   },
 };

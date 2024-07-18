@@ -10,16 +10,34 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.7",
+    "@nomicfoundation/hardhat-ethers": "^3.0.6",
+    "@nomicfoundation/hardhat-ignition": "^0.15.5",
+    "@nomicfoundation/hardhat-ignition-ethers": "^0.15.5",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.11",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.8",
+    "@nomicfoundation/ignition-core": "^0.15.5",
     "@tenderly/hardhat-tenderly": "^2.2.2",
-    "hardhat": "^2.22.6"
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.16",
+    "@types/mocha": "^10.0.7",
+    "chai": "^4.4.1",
+    "ethers": "^6.13.1",
+    "hardhat": "^2.22.6",
+    "hardhat-gas-reporter": "^1.0.10",
+    "solidity-coverage": "^0.8.12",
+    "typechain": "^8.3.2"
   },
   "dependencies": {
     "@balancer-labs/v2-interfaces": "^0.4.0",
     "@openzeppelin/contracts": "^5.0.2",
-    "@uniswap/sdk-core": "^5.3.1",
+    "@uniswap/sdk-core": "^3.0.1",
+    "@uniswap/v2-periphery": "^1.1.0-beta.0",
+    "@uniswap/v3-periphery": "^1.0.0",
     "@uniswap/v3-sdk": "^3.13.1",
     "dotenv": "^16.4.5",
-    "ethers": "^6.13.1"
+    "mysql2": "^3.10.3"
   }
 }
