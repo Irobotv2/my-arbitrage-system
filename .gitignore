@@ -20,3 +20,10 @@ ignition/deployments/chain-31337
 Hard wallet eth addresssrc/arbitrage_opportunities.log
 src/updateuv3.log
 src/updateuv3.log
+src/arbitrage_opportunities.log
+src/arbitragetest.log
+src/uniswap_v2_pair_finder.log
+src/uniswap_v2_pair_updater.log
+src/update_uniswap.log
+src/updateuv2.log
+src/updateuv3.log
