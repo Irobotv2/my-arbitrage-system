@@ -3,6 +3,7 @@ import aiomysql
 import logging
 from decimal import Decimal, getcontext
 from datetime import datetime, timedelta
+import time
 
 # Set higher precision for Decimal calculations
 getcontext().prec = 30
@@ -24,6 +25,48 @@ DB_CONFIG = {
     'maxsize': 5,
     'minsize': 1,
 }
+
+def filter_arbitrage_opportunities(opportunities, min_profit_bps=10, max_price_diff_bps=1000, min_liquidity_usd=10000):
+    filtered_opportunities = []
+    current_time = time.time()
+
+    for opp in opportunities:
+        v2_price = Decimal(opp['v2_price'])
+        v3_price = Decimal(opp['v3_price'])
+        basis_points = Decimal(opp['basis_points'])
+
+        # Basic sanity checks
+        if v2_price <= 0 or v3_price <= 0:
+            continue
+
+        if not (opp['v2_pair'].startswith('0x') and opp['v3_pool'].startswith('0x')):
+            continue
+
+        # Check profit threshold
+        if basis_points < min_profit_bps:
+            continue
+
+        # Check maximum price difference
+        if basis_points > max_price_diff_bps:
+            continue
+
+        # Verify direction
+        if opp['direction'] == 'Buy on V2, sell on V3' and v2_price >= v3_price:
+            continue
+        if opp['direction'] == 'Buy on V3, sell on V2' and v3_price >= v2_price:
+            continue
+
+        # Time sensitivity (assuming opportunities are less than 5 minutes old)
+        if 'timestamp' in opp and (current_time - opp['timestamp'].timestamp()) > 300:
+            continue
+
+        # Liquidity check (you would need to add liquidity data to your opportunities)
+        # if 'liquidity_usd' in opp and opp['liquidity_usd'] < min_liquidity_usd:
+        #     continue
+
+        filtered_opportunities.append(opp)
+
+    return filtered_opportunities
 
 async def check_arbitrage(conn):
     opportunities = []
@@ -71,7 +114,8 @@ async def check_arbitrage(conn):
                     'v2_price': Decimal(v2_price),
                     'v3_price': Decimal(v3_price),
                     'basis_points': Decimal(basis_points_diff),
-                    'direction': "Buy on V2, sell on V3" if Decimal(v2_price) < Decimal(v3_price) else "Buy on V3, sell on V2"
+                    'direction': "Buy on V2, sell on V3" if Decimal(v2_price) < Decimal(v3_price) else "Buy on V3, sell on V2",
+                    'timestamp': datetime.now()
                 }
                 opportunities.append(opportunity)
                 logging.info(f"Potential arbitrage opportunity found! {opportunity}")
@@ -87,11 +131,11 @@ async def insert_opportunities(conn, opportunities):
         for opp in opportunities:
             await cur.execute("""
                 INSERT INTO arbitrage_opportunities 
-                (pair, v2_pair, v3_pool, v2_price, v3_price, basis_points, direction)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (pair, v2_pair, v3_pool, v2_price, v3_price, basis_points, direction, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 opp['pair'], opp['v2_pair'], opp['v3_pool'], 
-                opp['v2_price'], opp['v3_price'], opp['basis_points'], opp['direction']
+                opp['v2_price'], opp['v3_price'], opp['basis_points'], opp['direction'], opp['timestamp']
             ))
         await conn.commit()
 
@@ -106,9 +150,11 @@ async def monitor_arbitrage(duration_hours=12):
     try:
         async with pool.acquire() as conn:
             while datetime.now() < end_time:
-                opportunities = await check_arbitrage(conn)
+                raw_opportunities = await check_arbitrage(conn)
+                filtered_opps = filter_arbitrage_opportunities(raw_opportunities)
+                
                 current_time = datetime.now()
-                for opp in opportunities:
+                for opp in filtered_opps:
                     pair = opp['pair']
                     if pair not in last_insert_time or (current_time - last_insert_time[pair]).total_seconds() > 300:  # 5 minutes cooldown
                         try:
