@@ -1,0 +1,454 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.7.6;
+pragma abicoder v2;
+
+import "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
+import "@balancer-labs/v2-interfaces/contracts/vault/IFlashLoanRecipient.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
+
+contract FlashLoanArbitrage is IFlashLoanRecipient {
+    using SafeMath for uint256;
+
+    IVault private constant BALANCER_VAULT = IVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    address private constant UNISWAP_V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
+    address public owner;
+
+    struct V3PoolData {
+        uint160 sqrtPriceX96;
+        int24 tick;
+        uint128 liquidity;
+    }
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner");
+        _;
+    }
+
+    function executeArbitrage(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        address[] memory path,
+        address[] memory pools,
+        bool[] memory isV3,
+        uint24[] memory fees
+    ) external onlyOwner {
+        require(tokens.length == 1, "Only single token flash loans supported");
+        BALANCER_VAULT.flashLoan(this, tokens, amounts, abi.encode(path, pools, isV3, fees));
+    }
+
+    function receiveFlashLoan(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        uint256[] memory feeAmounts,
+        bytes memory userData
+    ) external override {
+        require(msg.sender == address(BALANCER_VAULT), "Only Balancer Vault");
+        
+        (address[] memory path, address[] memory pools, bool[] memory isV3, uint24[] memory fees) = abi.decode(userData, (address[], address[], bool[], uint24[]));
+        uint256 flashLoanAmount = amounts[0];
+        uint256 flashLoanFee = feeAmounts[0];
+
+        uint256 startBalance = IERC20(path[0]).balanceOf(address(this));
+        
+        for (uint i = 0; i < path.length - 1; i++) {
+            uint256 amountIn = i == 0 ? flashLoanAmount : IERC20(path[i]).balanceOf(address(this));
+            if (isV3[i]) {
+                executeV3Swap(path[i], path[i+1], pools[i], amountIn, fees[i]);
+            } else {
+                executeV2Swap(path[i], path[i+1], pools[i], amountIn);
+            }
+        }
+
+        uint256 endBalance = IERC20(path[0]).balanceOf(address(this));
+        require(endBalance >= startBalance.add(flashLoanFee), "Arbitrage didn't profit");
+
+        IERC20(path[0]).transfer(address(BALANCER_VAULT), flashLoanAmount.add(flashLoanFee));
+
+        emit ArbitrageExecuted(endBalance.sub(startBalance).sub(flashLoanFee));
+    }
+
+    function executeV2Swap(address tokenIn, address tokenOut, address pool, uint256 amountIn) internal {
+        IERC20(tokenIn).transfer(pool, amountIn);
+        (uint amount0Out, uint amount1Out) = IUniswapV2Pair(pool).token0() == tokenOut 
+            ? (uint(0), IERC20(tokenOut).balanceOf(address(this)))
+            : (IERC20(tokenOut).balanceOf(address(this)), uint(0));
+        IUniswapV2Pair(pool).swap(amount0Out, amount1Out, address(this), new bytes(0));
+    }
+
+    function executeV3Swap(address tokenIn, address tokenOut, address pool, uint256 amountIn, uint24 fee) internal {
+        IUniswapV3Pool(pool).swap(
+            address(this),
+            tokenIn < tokenOut,
+            int256(amountIn),
+            tokenIn < tokenOut ? TickMath.MAX_SQRT_RATIO - 1 : TickMath.MIN_SQRT_RATIO + 1,
+            abi.encode(tokenIn, tokenOut, fee)
+        );
+    }
+
+    function uniswapV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        (address tokenIn, address tokenOut, uint24 fee) = abi.decode(data, (address, address, uint24));
+        address pool = PoolAddress.computeAddress(
+            UNISWAP_V3_FACTORY,
+            PoolAddress.getPoolKey(tokenIn, tokenOut, fee)
+        );
+        require(msg.sender == pool, "Only pool");
+
+        uint256 amountToPay = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
+        IERC20(tokenIn).transfer(msg.sender, amountToPay);
+    }
+
+    function simulateArbitrage(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        address[] memory path,
+        address[] memory pools,
+        bool[] memory isV3,
+        uint24[] memory fees,
+        V3PoolData[] memory v3PoolData
+    ) external view returns (uint256 estimatedProfit) {
+        require(tokens.length == 1, "Only single token flash loans supported");
+        uint256 flashLoanAmount = amounts[0];
+        uint256 flashLoanFee = BALANCER_VAULT.getProtocolFeesCollector().getFlashLoanFeePercentage().mul(flashLoanAmount).div(1e18);
+
+        uint256 currentAmount = flashLoanAmount;
+        
+        for (uint i = 0; i < path.length - 1; i++) {
+            if (isV3[i]) {
+                currentAmount = simulateV3Swap(path[i], path[i+1], pools[i], currentAmount, fees[i], v3PoolData[i]);
+            } else {
+                currentAmount = simulateV2Swap(path[i], path[i+1], pools[i], currentAmount);
+            }
+        }
+
+        if (currentAmount > flashLoanAmount.add(flashLoanFee)) {
+            estimatedProfit = currentAmount.sub(flashLoanAmount).sub(flashLoanFee);
+        } else {
+            estimatedProfit = 0;
+        }
+    }
+
+    function simulateV2Swap(address tokenIn, address tokenOut, address pool, uint256 amountIn) internal view returns (uint256 amountOut) {
+        IUniswapV2Pair pair = IUniswapV2Pair(pool);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        (uint112 reserveIn, uint112 reserveOut) = pair.token0() == tokenIn ? (reserve0, reserve1) : (reserve1, reserve0);
+
+        uint256 amountInWithFee = amountIn.mul(997);
+        amountOut = amountInWithFee.mul(reserveOut) / reserveIn.mul(1000).add(amountInWithFee);
+    }
+
+    function simulateV3Swap(
+        address tokenIn,
+        address tokenOut,
+        address pool,
+        uint256 amountIn,
+        uint24 fee,
+        V3PoolData memory poolData
+    ) internal pure returns (uint256 amountOut) {
+        bool zeroForOne = tokenIn < tokenOut;
+        (int256 amount0, int256 amount1) = SwapMath.computeSwapStep(
+            poolData.sqrtPriceX96,
+            zeroForOne 
+                ? TickMath.getSqrtRatioAtTick(poolData.tick - 1)
+                : TickMath.getSqrtRatioAtTick(poolData.tick + 1),
+            poolData.liquidity,
+            int256(amountIn),
+            fee
+        );
+
+        amountOut = uint256(-(zeroForOne ? amount1 : amount0));
+    }
+
+    receive() external payable {}
+
+    function withdraw(address token, uint256 amount) external onlyOwner {
+        if (token == address(0)) {
+            payable(owner).transfer(amount);
+        } else {
+            IERC20(token).transfer(owner, amount);
+        }
+    }
+
+    event ArbitrageExecuted(uint256 profit);
+}
+library TickMath {
+    int24 internal constant MIN_TICK = -887272;
+    int24 internal constant MAX_TICK = -MIN_TICK;
+    uint160 internal constant MIN_SQRT_RATIO = 4295128739;
+    uint160 internal constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
+
+    function getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
+        uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
+        require(absTick <= uint256(MAX_TICK), 'T');
+
+        uint256 ratio = absTick & 0x1 != 0 ? 0xfffcb933bd6fad37aa2d162d1a594001 : 0x100000000000000000000000000000000;
+        if (absTick & 0x2 != 0) ratio = (ratio * 0xfff97272373d413259a46990580e213a) >> 128;
+        if (absTick & 0x4 != 0) ratio = (ratio * 0xfff2e50f5f656932ef12357cf3c7fdcc) >> 128;
+        if (absTick & 0x8 != 0) ratio = (ratio * 0xffe5caca7e10e4e61c3624eaa0941cd0) >> 128;
+        if (absTick & 0x10 != 0) ratio = (ratio * 0xffcb9843d60f6159c9db58835c926644) >> 128;
+        if (absTick & 0x20 != 0) ratio = (ratio * 0xff973b41fa98c081472e6896dfb254c0) >> 128;
+        if (absTick & 0x40 != 0) ratio = (ratio * 0xff2ea16466c96a3843ec78b326b52861) >> 128;
+        if (absTick & 0x80 != 0) ratio = (ratio * 0xfe5dee046a99a2a811c461f1969c3053) >> 128;
+        if (absTick & 0x100 != 0) ratio = (ratio * 0xfcbe86c7900a88aedcffc83b479aa3a4) >> 128;
+        if (absTick & 0x200 != 0) ratio = (ratio * 0xf987a7253ac413176f2b074cf7815e54) >> 128;
+        if (absTick & 0x400 != 0) ratio = (ratio * 0xf3392b0822b70005940c7a398e4b70f3) >> 128;
+        if (absTick & 0x800 != 0) ratio = (ratio * 0xe7159475a2c29b7443b29c7fa6e889d9) >> 128;
+        if (absTick & 0x1000 != 0) ratio = (ratio * 0xd097f3bdfd2022b8845ad8f792aa5825) >> 128;
+        if (absTick & 0x2000 != 0) ratio = (ratio * 0xa9f746462d870fdf8a65dc1f90e061e5) >> 128;
+        if (absTick & 0x4000 != 0) ratio = (ratio * 0x70d869a156d2a1b890bb3df62baf32f7) >> 128;
+        if (absTick & 0x8000 != 0) ratio = (ratio * 0x31be135f97d08fd981231505542fcfa6) >> 128;
+        if (absTick & 0x10000 != 0) ratio = (ratio * 0x9aa508b5b7a84e1c677de54f3e99bc9) >> 128;
+        if (absTick & 0x20000 != 0) ratio = (ratio * 0x5d6af8dedb81196699c329225ee604) >> 128;
+        if (absTick & 0x40000 != 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98) >> 128;
+        if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
+
+        if (tick > 0) ratio = type(uint256).max / ratio;
+
+        sqrtPriceX96 = uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
+    }
+}
+
+library SwapMath {
+    function computeSwapStep(
+        uint160 sqrtRatioCurrentX96,
+        uint160 sqrtRatioTargetX96,
+        uint128 liquidity,
+        int256 amountRemaining,
+        uint24 feePips
+    ) internal pure returns (uint160 sqrtRatioNextX96, int256 amountIn, int256 amountOut, uint256 feeAmount) {
+        bool zeroForOne = sqrtRatioCurrentX96 >= sqrtRatioTargetX96;
+        bool exactIn = amountRemaining >= 0;
+
+        if (exactIn) {
+            uint256 amountRemainingLessFee = FullMath.mulDiv(uint256(amountRemaining), 1e6 - feePips, 1e6);
+            amountIn = zeroForOne
+                ? SqrtPriceMath.getAmount0Delta(sqrtRatioTargetX96, sqrtRatioCurrentX96, liquidity, true)
+                : SqrtPriceMath.getAmount1Delta(sqrtRatioCurrentX96, sqrtRatioTargetX96, liquidity, true);
+            if (uint256(amountIn) > amountRemainingLessFee) {
+                amountIn = int256(amountRemainingLessFee);
+            }
+        } else {
+            amountOut = zeroForOne
+                ? SqrtPriceMath.getAmount1Delta(sqrtRatioTargetX96, sqrtRatioCurrentX96, liquidity, false)
+                : SqrtPriceMath.getAmount0Delta(sqrtRatioCurrentX96, sqrtRatioTargetX96, liquidity, false);
+            if (uint256(-amountOut) > uint256(-amountRemaining)) {
+                amountOut = amountRemaining;
+            }
+        }
+
+        if (zeroForOne) {
+            sqrtRatioNextX96 = SqrtPriceMath.getNextSqrtPriceFromAmount0RoundingUp(
+                sqrtRatioCurrentX96,
+                liquidity,
+                uint256(amountIn),
+                true
+            );
+        } else {
+            sqrtRatioNextX96 = SqrtPriceMath.getNextSqrtPriceFromAmount1RoundingDown(
+                sqrtRatioCurrentX96,
+                liquidity,
+                uint256(amountIn),
+                true
+            );
+        }
+
+        bool max = sqrtRatioTargetX96 == sqrtRatioNextX96;
+
+        if (zeroForOne) {
+            amountIn = max && exactIn
+                ? amountIn
+                : SqrtPriceMath.getAmount0Delta(sqrtRatioNextX96, sqrtRatioCurrentX96, liquidity, true);
+            amountOut = max && !exactIn
+                ? amountOut
+                : SqrtPriceMath.getAmount1Delta(sqrtRatioNextX96, sqrtRatioCurrentX96, liquidity, false);
+        } else {
+            amountIn = max && exactIn
+                ? amountIn
+                : SqrtPriceMath.getAmount1Delta(sqrtRatioCurrentX96, sqrtRatioNextX96, liquidity, true);
+            amountOut = max && !exactIn
+                ? amountOut
+                : SqrtPriceMath.getAmount0Delta(sqrtRatioCurrentX96, sqrtRatioNextX96, liquidity, false);
+        }
+
+        if (!exactIn && amountOut > amountRemaining) {
+            amountOut = amountRemaining;
+        }
+
+        if (exactIn && sqrtRatioNextX96 != sqrtRatioTargetX96) {
+            feeAmount = uint256(amountRemaining) - uint256(amountIn);
+        } else {
+            feeAmount = FullMath.mulDivRoundingUp(uint256(amountIn), feePips, 1e6 - feePips);
+        }
+    }
+}
+
+library PoolAddress {
+    bytes32 internal constant POOL_INIT_CODE_HASH = 0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54;
+
+    struct PoolKey {
+        address token0;
+        address token1;
+        uint24 fee;
+    }
+
+    function getPoolKey(
+        address tokenA,
+        address tokenB,
+        uint24 fee
+    ) internal pure returns (PoolKey memory) {
+        if (tokenA > tokenB) (tokenA, tokenB) = (tokenB, tokenA);
+        return PoolKey({token0: tokenA, token1: tokenB, fee: fee});
+    }
+
+    function computeAddress(address factory, PoolKey memory key) internal pure returns (address pool) {
+        require(key.token0 < key.token1);
+        pool = address(
+            uint256(
+                keccak256(
+                    abi.encodePacked(
+                        hex'ff',
+                        factory,
+                        keccak256(abi.encode(key.token0, key.token1, key.fee)),
+                        POOL_INIT_CODE_HASH
+                    )
+                )
+            )
+        );
+    }
+}
+library SqrtPriceMath {
+    function getAmount0Delta(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint128 liquidity,
+        bool roundUp
+    ) internal pure returns (uint256 amount0) {
+        if (sqrtRatioAX96 > sqrtRatioBX96)
+            (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+
+        uint256 numerator1 = uint256(liquidity) << 96;
+        uint256 numerator2 = sqrtRatioBX96 - sqrtRatioAX96;
+
+        require(sqrtRatioAX96 > 0);
+
+        return
+            roundUp
+                ? FullMath.mulDivRoundingUp(numerator1, numerator2, sqrtRatioBX96)
+                : FullMath.mulDiv(numerator1, numerator2, sqrtRatioBX96) / sqrtRatioAX96;
+    }
+
+    function getAmount1Delta(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint128 liquidity,
+        bool roundUp
+    ) internal pure returns (uint256 amount1) {
+        if (sqrtRatioAX96 > sqrtRatioBX96)
+            (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+
+        return
+            roundUp
+                ? FullMath.mulDivRoundingUp(liquidity, sqrtRatioBX96 - sqrtRatioAX96, 0x1000000000000000000000000)
+                : FullMath.mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, 0x1000000000000000000000000);
+    }
+
+    function getNextSqrtPriceFromAmount0RoundingUp(
+        uint160 sqrtPX96,
+        uint128 liquidity,
+        uint256 amount,
+        bool add
+    ) internal pure returns (uint160) {
+        // Implement this function
+    }
+
+    function getNextSqrtPriceFromAmount1RoundingDown(
+        uint160 sqrtPX96,
+        uint128 liquidity,
+        uint256 amount,
+        bool add
+    ) internal pure returns (uint160) {
+        // Implement this function
+    }
+}
+
+library FullMath {
+    function mulDiv(
+        uint256 a,
+        uint256 b,
+        uint256 denominator
+    ) internal pure returns (uint256 result) {
+        uint256 prod0;
+        uint256 prod1;
+        assembly {
+            let mm := mulmod(a, b, not(0))
+            prod0 := mul(a, b)
+            prod1 := sub(sub(mm, prod0), lt(mm, prod0))
+        }
+
+        if (prod1 == 0) {
+            require(denominator > 0);
+            assembly {
+                result := div(prod0, denominator)
+            }
+            return result;
+        }
+
+        require(denominator > prod1);
+
+        uint256 remainder;
+        assembly {
+            remainder := mulmod(a, b, denominator)
+        }
+        assembly {
+            prod1 := sub(prod1, gt(remainder, prod0))
+            prod0 := sub(prod0, remainder)
+        }
+
+        uint256 twos = -denominator & denominator;
+        assembly {
+            denominator := div(denominator, twos)
+        }
+
+        assembly {
+            prod0 := div(prod0, twos)
+        }
+        assembly {
+            twos := add(div(sub(0, twos), twos), 1)
+        }
+        prod0 |= prod1 * twos;
+
+        uint256 inv = (3 * denominator) ^ 2;
+        inv *= 2 - denominator * inv;
+        inv *= 2 - denominator * inv;
+        inv *= 2 - denominator * inv;
+        inv *= 2 - denominator * inv;
+        inv *= 2 - denominator * inv;
+        inv *= 2 - denominator * inv;
+
+        result = prod0 * inv;
+        return result;
+    }
+
+    function mulDivRoundingUp(
+        uint256 a,
+        uint256 b,
+        uint256 denominator
+    ) internal pure returns (uint256 result) {
+        result = mulDiv(a, b, denominator);
+        if (mulmod(a, b, denominator) > 0) {
+            require(result < type(uint256).max);
+            result++;
+        }
+    }
+}
