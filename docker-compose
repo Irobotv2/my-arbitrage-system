@@ -1,0 +1,73 @@
+services:
+  execution:
+    image: ethereum/client-go:stable
+    container_name: ethereum_node-execution-1
+    ports:
+      - "8545:8545"
+      - "8551:8551"
+      - "30303:30303"
+    volumes:
+      - ./execution:/root/.ethereum
+      - C:\ethereum_node\jwt.hex:/jwt/jwt.hex:ro
+    command:
+      - --http
+      - --http.api=eth,net,engine,admin
+      - --http.addr=0.0.0.0
+      - --http.vhosts=*
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.vhosts=*
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --mainnet
+      - --syncmode=snap
+      - --snapshot=true
+      - --metrics
+      - --metrics.expensive
+    restart: unless-stopped
+    networks:
+      - ethereum_network
+    healthcheck:
+      test: ["CMD", "geth", "attach", "--exec", "eth.syncing"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  consensus:
+    image: gcr.io/prysmaticlabs/prysm/beacon-chain:stable
+    container_name: ethereum_node-consensus-1
+    ports:
+      - "4000:4000"
+      - "13001:13001"
+      - "12001:12001/udp"
+    volumes:
+      - ./consensus:/data
+      - C:\ethereum_node\jwt.hex:/jwt/jwt.hex:ro
+    command:
+      - --accept-terms-of-use
+      - --datadir=/data
+      - --execution-endpoint=http://execution:8551
+      - --jwt-secret=/jwt/jwt.hex
+      - --rpc-host=0.0.0.0
+      - --grpc-gateway-host=0.0.0.0
+      - --monitoring-host=0.0.0.0
+      - --p2p-tcp-port=13001
+      - --p2p-udp-port=12001
+      - --checkpoint-sync-url=https://beaconstate.info
+      - --genesis-beacon-api-url=https://beaconstate.info
+    environment:
+      - PRYSM_VERBOSITY=info
+      - PRYSM_P2P_MAX_PEERS=100
+    depends_on:
+      execution:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ethereum_network
+
+networks:
+  ethereum_network:
+    name: ethereum_node_default
+
+volumes:
+  execution:
+  consensus:
