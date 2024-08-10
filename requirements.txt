@@ -382,3 +382,6 @@ Trade Execution Service: For executing trades on the blockchain.
 
 
 prysm.bat beacon-chain --execution-endpoint=http://localhost:8551 --mainnet --jwt-secret=C:\ethereum_node\jwt.hex --checkpoint-sync-url=https://beaconstate.info --genesis-beacon-api-url=https://beaconstate.info
+
+
+C:\ethereum_node\consensus>prysm.bat beacon-chain --execution-endpoint=http://localhost:8551 --mainnet --jwt-secret=C:\ethereum_node\jwt.hex --checkpoint-sync-url=https://beaconstate.info --genesis-beacon-api-url=https://beaconstate.info
