@@ -1,0 +1,7 @@
+Found 101 tokens
+Found 29 V2 pools
+Found 85 V3 pools
+
+Data Integrity Check Summary:
+Total Errors: 0
+Total Warnings: 0

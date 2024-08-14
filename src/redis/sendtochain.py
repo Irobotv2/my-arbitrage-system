@@ -117,11 +117,16 @@ def fetch_all_token_pairs():
 
 async def find_multi_hop_arbitrage(session, start_token, flash_loan_amount, max_hops=3):
     paths = []
+    paths_explored = 0
     async def dfs(current_token, path, amount, hop):
+        nonlocal paths_explored
+        paths_explored += 1
         if hop > max_hops:
+            logger.debug(f"Max hops reached for path: {' -> '.join([get_token_symbol(t) for t, _, _ in path])}")
             return
         
         pools = get_pools_for_token(current_token)
+        logger.debug(f"Found {len(pools)} pools for token {get_token_symbol(current_token)}")
         for pool in pools:
             next_token = get_other_token(pool, current_token)
             next_amount = await calculate_output_amount(session, pool, current_token, next_token, amount)
@@ -132,13 +137,19 @@ async def find_multi_hop_arbitrage(session, start_token, flash_loan_amount, max_
             
             if next_token == start_token:
                 if next_amount > flash_loan_amount:
-                    paths.append((new_path, next_amount - flash_loan_amount))
+                    profit = next_amount - flash_loan_amount
+                    logger.info(f"Found profitable path: {' -> '.join([get_token_symbol(t) for t, _, _ in new_path])}")
+                    logger.info(f"Estimated profit: {Web3.from_wei(profit, 'ether')} {get_token_symbol(start_token)}")
+                    paths.append((new_path, profit))
+                else:
+                    logger.debug(f"Path complete but not profitable: {' -> '.join([get_token_symbol(t) for t, _, _ in new_path])}")
             else:
                 await dfs(next_token, new_path, next_amount, hop + 1)
     
     await dfs(start_token, [], flash_loan_amount, 0)
+    logger.info(f"Total paths explored: {paths_explored}")
+    logger.info(f"Profitable paths found: {len(paths)}")
     return paths
-
 def get_pools_for_token(token):
     v2_pools = redis_client.keys(f"uniswap_v2_pair:*:{token}:*")
     v3_pools = redis_client.keys(f"uniswap_v3_pool:*:{token}:*")
@@ -227,6 +238,8 @@ async def simulate_arbitrage(path, flash_loan_amount):
         logger.error(f"Simulation failed: {str(e)}")
         return {'success': False, 'error': str(e)}
 
+
+
 async def main(run_time=5):
     start_time = datetime.now()
     end_time = start_time + timedelta(minutes=run_time)
@@ -240,6 +253,7 @@ async def main(run_time=5):
     
     all_opportunities = []
     simulated_opportunities = []
+    executed_opportunities = []
     
     async with aiohttp.ClientSession() as session:
         while datetime.now() < end_time:
@@ -261,6 +275,20 @@ async def main(run_time=5):
                             'simulated_profit': simulation_result['profit']
                         })
                         simulated_opportunities.append(simulation_result)
+                        
+                        # Attempt to execute the arbitrage on Tenderly if profit is positive
+                        if simulation_result['profit'] > 0:
+                            success, tx_receipt = await execute_arbitrage_on_tenderly(path, flash_loan_amount)
+                            if success:
+                                logger.info(f"Successfully executed arbitrage on Tenderly. Profit: {simulation_result['profit']} WETH")
+                                executed_opportunities.append({
+                                    'path': path,
+                                    'estimated_profit': estimated_profit,
+                                    'simulated_profit': simulation_result['profit'],
+                                    'tx_receipt': tx_receipt
+                                })
+                            else:
+                                logger.warning(f"Failed to execute arbitrage on Tenderly. Simulated profit was: {simulation_result['profit']} WETH")
                 
                 all_paths_logger.info(f"Completed analysis for token pair: {start_token_symbol} - {end_token_symbol}")
                 all_paths_logger.info("============================\n")
@@ -269,18 +297,76 @@ async def main(run_time=5):
             await asyncio.sleep(1)  # Add a small delay to prevent overwhelming the system
     
     total_runtime = datetime.now() - start_time
-    report = generate_detailed_report(all_opportunities, simulated_opportunities, total_runtime)
+    report = generate_detailed_report(all_opportunities, simulated_opportunities, executed_opportunities, total_runtime)
     logger.info("Multi-hop arbitrage search completed. Final report:")
     logger.info("\n" + report)
 
-    return all_opportunities, simulated_opportunities, total_runtime
+    return all_opportunities, simulated_opportunities, executed_opportunities, total_runtime
 
-def generate_detailed_report(all_opportunities, simulated_opportunities, runtime):
+async def execute_arbitrage_on_tenderly(path, flash_loan_amount):
+    logger.info(f"Executing arbitrage on Tenderly for path: {' -> '.join([get_token_symbol(step[0]) for step in path])}")
+    contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+    
+    swap_steps = []
+    for token_in, token_out, pool in path:
+        pool_data = redis_client.hgetall(pool)
+        is_v3 = 'v3_pool' in pool
+        swap_steps.append({
+            'tokenIn': Web3.to_checksum_address(token_in),
+            'tokenOut': Web3.to_checksum_address(token_out),
+            'pool': Web3.to_checksum_address(pool_data['pair_address'] if 'pair_address' in pool_data else pool_data['pool_address']),
+            'isV3': is_v3,
+            'fee': 3000 if is_v3 else 0,
+            'price': Web3.to_wei('1', 'ether')  # This will be calculated dynamically in the contract
+        })
+    
+    try:
+        # Estimate gas
+        gas_estimate = await contract.functions.executeArbitrage(
+            flash_loan_amount,
+            swap_steps
+        ).estimate_gas({
+            'from': YOUR_WALLET_ADDRESS,
+        })
+        logger.info(f"Estimated gas: {gas_estimate}")
+
+        # Build transaction
+        transaction = await contract.functions.executeArbitrage(
+            flash_loan_amount,
+            swap_steps
+        ).build_transaction({
+            'from': YOUR_WALLET_ADDRESS,
+            'gas': int(gas_estimate * 1.2),  # Add 20% buffer
+            'gasPrice': await w3.eth.gas_price,
+            'nonce': await w3.eth.get_transaction_count(YOUR_WALLET_ADDRESS),
+        })
+        
+        # Sign and send transaction
+        signed_txn = w3.eth.account.sign_transaction(transaction, YOUR_PRIVATE_KEY)
+        tx_hash = await w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        
+        # Wait for transaction receipt
+        tx_receipt = await w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        if tx_receipt['status'] == 1:
+            logger.info(f"Arbitrage executed successfully on Tenderly. Transaction hash: {tx_receipt['transactionHash'].hex()}")
+            logger.info(f"Gas used: {tx_receipt['gasUsed']}")
+            return True, tx_receipt
+        else:
+            logger.error(f"Arbitrage execution failed on Tenderly. Transaction hash: {tx_receipt['transactionHash'].hex()}")
+            return False, tx_receipt
+    
+    except Exception as e:
+        logger.error(f"Error executing arbitrage on Tenderly: {str(e)}")
+        return False, None
+
+def generate_detailed_report(all_opportunities, simulated_opportunities, executed_opportunities, runtime):
     report = [
         f"1. Total runtime: {runtime}",
         f"2. Total potential opportunities found: {len(all_opportunities)}",
         f"3. Total simulated opportunities: {len(simulated_opportunities)}",
-        "4. Detailed opportunity breakdown:"
+        f"4. Total executed opportunities: {len(executed_opportunities)}",
+        "5. Detailed opportunity breakdown:"
     ]
     
     for idx, opp in enumerate(all_opportunities, 1):
@@ -297,29 +383,58 @@ def generate_detailed_report(all_opportunities, simulated_opportunities, runtime
             pool_version = "V3" if 'v3_pool' in pool else "V2"
             report.append(f"     Step {i+1}: {get_token_symbol(token_in)} -> {get_token_symbol(token_out)} ({pool_version})")
     
+    if executed_opportunities:
+        report.append("\n6. Executed Opportunities:")
+        for idx, opp in enumerate(executed_opportunities, 1):
+            report.extend([
+                f"\nExecuted Opportunity {idx}:",
+                f"   Path: {' -> '.join([get_token_symbol(step[0]) for step in opp['path']])}",
+                f"   Estimated profit: {Web3.from_wei(opp['estimated_profit'], 'ether')} {get_token_symbol(opp['path'][0][0])}",
+                f"   Simulated profit: {opp['simulated_profit']} {get_token_symbol(opp['path'][0][0])}",
+                f"   Transaction Hash: {opp['tx_receipt']['transactionHash'].hex()}",
+                f"   Gas Used: {opp['tx_receipt']['gasUsed']}"
+            ])
+    
     return "\n".join(report)
 
 async def run_arbitrage_bot():
     try:
-        opportunities, simulated_opportunities, total_runtime = await main(run_time=5)  # Run for 5 minutes
-        
+        logger.info("Starting arbitrage bot...")
+        result = await main(run_time=5)  # Run for 5 minutes
+        logger.info("Main function completed. Processing results...")
+
+        # Log the structure of the result
+        logger.info(f"Result type: {type(result)}, Length: {len(result) if isinstance(result, (list, tuple)) else 'N/A'}")
+
+        # Unpack the result carefully
+        if isinstance(result, tuple) and len(result) == 4:
+            opportunities, simulated_opportunities, executed_opportunities, total_runtime = result
+        else:
+            logger.error(f"Unexpected result structure from main(): {result}")
+            return
+
         logger.info("Arbitrage bot run completed.")
         logger.info(f"Total runtime: {total_runtime}")
         logger.info(f"Total opportunities found: {len(opportunities)}")
         logger.info(f"Total simulated opportunities: {len(simulated_opportunities)}")
+        logger.info(f"Total executed opportunities: {len(executed_opportunities)}")
         
         # Visualize the arbitrage paths
         if opportunities:
             visualize_arbitrage_paths(opportunities)
         
         # Generate and save a detailed report
-        report = generate_detailed_report(opportunities, simulated_opportunities, total_runtime)
+        report = generate_detailed_report(opportunities, simulated_opportunities, executed_opportunities, total_runtime)
         with open('arbitrage_report.txt', 'w') as f:
             f.write(report)
         logger.info("Detailed report saved to 'arbitrage_report.txt'")
         
     except Exception as e:
-        logger.error(f"Unexpected error in main execution: {e}")
+        logger.error(f"Unexpected error in main execution: {str(e)}")
+        logger.exception("Full traceback:")
+
+logger.info("Arbitrage bot script execution completed.")
+logger.info("Check 'all_analyzed_paths.log' for detailed path analysis.")
 
 def visualize_arbitrage_paths(opportunities):
     G = nx.DiGraph()

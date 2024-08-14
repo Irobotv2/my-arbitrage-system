@@ -182,7 +182,10 @@ async def update_redis_with_token_data(token_info):
         await redis_client.hset(pair_key, mapping={
             'pair_address': pair['pair_address'],
             'token0': pair['token0'],
-            'token1': pair['token1']
+            'token1': pair['token1'],
+            'reserve0': '0',  # Add this field
+            'reserve1': '0',  # Add this field
+            'price': '0'      # Add this field
         })
 
     for pool in token_info['v3_pools']:
@@ -191,7 +194,9 @@ async def update_redis_with_token_data(token_info):
             'pool_address': pool['pool_address'],
             'token0': pool['token0'],
             'token1': pool['token1'],
-            'fee': str(pool['fee'])
+            'fee': str(pool['fee']),
+            'liquidity': '0',       # Add this field
+            'sqrtPriceX96': '0'     # Add this field
         })
 
 async def fetch_and_store_token_data(token_address):
@@ -224,6 +229,37 @@ async def store_token_pairs():
         })
     logger.info(f"Stored {len(pairs)} token pairs in Redis")
 
+async def verify_redis_data():
+    logger.info("Verifying Redis data...")
+    
+    # Check tokens
+    tokens = await redis_client.keys("token:*")
+    logger.info(f"Found {len(tokens)} tokens")
+    for token_key in tokens[:5]:  # Log details of first 5 tokens
+        token_data = await redis_client.hgetall(token_key)
+        logger.info(f"Token data for {token_key}: {token_data}")
+    
+    # Check V2 pairs
+    v2_pairs = await redis_client.keys("uniswap_v2_pair:*")
+    logger.info(f"Found {len(v2_pairs)} V2 pairs")
+    for pair_key in v2_pairs[:5]:  # Log details of first 5 pairs
+        pair_data = await redis_client.hgetall(pair_key)
+        logger.info(f"V2 pair data for {pair_key}: {pair_data}")
+    
+    # Check V3 pools
+    v3_pools = await redis_client.keys("uniswap_v3_pool:*")
+    logger.info(f"Found {len(v3_pools)} V3 pools")
+    for pool_key in v3_pools[:5]:  # Log details of first 5 pools
+        pool_data = await redis_client.hgetall(pool_key)
+        logger.info(f"V3 pool data for {pool_key}: {pool_data}")
+    
+    # Check token pairs
+    token_pairs = await redis_client.keys("token_pair:*")
+    logger.info(f"Found {len(token_pairs)} token pairs")
+    for pair_key in token_pairs[:5]:  # Log details of first 5 token pairs
+        pair_data = await redis_client.hgetall(pair_key)
+        logger.info(f"Token pair data for {pair_key}: {pair_data}")
+
 async def main():
     try:
         logger.info("Starting token data insertion and pair generation process")
@@ -252,7 +288,10 @@ async def main():
         # Generate and store token pairs
         await store_token_pairs()
 
-        logger.info("Token data insertion and pair generation complete")
+        # Verify the data in Redis
+        await verify_redis_data()
+
+        logger.info("Token data insertion, pair generation, and verification complete")
     finally:
         logger.info("Closing connections")
         await redis_client.aclose()

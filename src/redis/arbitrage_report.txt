@@ -1,4 +1,5 @@
-1. Total runtime: 0:05:05.904504
+1. Total runtime: 0:05:00.377495
 2. Total potential opportunities found: 0
 3. Total simulated opportunities: 0
-4. Detailed opportunity breakdown:
+4. Total executed opportunities: 0
+5. Detailed opportunity breakdown:
