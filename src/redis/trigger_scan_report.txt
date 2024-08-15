@@ -1,9 +1,0 @@
-Trigger Scan Report
-===================
-
-Scan duration: 600 seconds
-Total triggers detected: 0
-
-Price Deviations: 0
-
-Liquidity Imbalances: 0

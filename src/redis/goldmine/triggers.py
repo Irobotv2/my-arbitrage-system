@@ -19,7 +19,7 @@ logger.addHandler(console_handler)
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
 # Constants
-PRICE_DEVIATION_THRESHOLD = 0.005  # 0.5%
+PRICE_DEVIATION_THRESHOLD = 0.001  # 0.5%
 LIQUIDITY_IMBALANCE_THRESHOLD = 0.05  # 5%
 SCAN_INTERVAL = 30  # seconds
 RUN_TIME = 600  # 10 minutes
@@ -117,7 +117,6 @@ async def check_v3_pool_data(pool_keys, num_pools=5):
         logger.info(f"Pool: {pool_key}")
         logger.info(f"Data: {pool_data}")
         logger.info("---")
-
 async def scan_price_deviations():
     logger.info("Scanning for price deviations...")
     all_tokens = redis_operation_with_retry(lambda: redis_client.keys("token:*"))
@@ -159,8 +158,8 @@ async def scan_price_deviations():
                 if result is None:
                     continue
                 liquidity, sqrt_price_x96 = result
-                price = (sqrt_price_x96 ** 2) / (2 ** 192)
-                prices.append(Decimal(price))
+                price = (Decimal(sqrt_price_x96) ** 2) / (2 ** 192)
+                prices.append(price)
                 logger.info(f"V3 Pool {pool_key}: Price = {price}")
             else:  # V2 pool
                 is_valid, message = validate_pool_data(pool_data, 'v2')
@@ -181,14 +180,17 @@ async def scan_price_deviations():
             max_price = max(prices)
             min_price = min(prices)
             deviation = (max_price - min_price) / min_price
-            log_price_deviation(token_symbol, deviation, PRICE_DEVIATION_THRESHOLD)
+            logger.info(f"Token {token_symbol}: Max Price = {max_price}, Min Price = {min_price}, Deviation = {deviation:.4%}")
             if deviation > PRICE_DEVIATION_THRESHOLD:
+                logger.info(f"Price deviation detected for {token_symbol}")
                 triggers.append({
                     'type': 'price_deviation',
                     'token': token_symbol,
                     'deviation': f"{deviation:.2%}",
                     'timestamp': datetime.now().isoformat()
                 })
+            else:
+                logger.info(f"No significant price deviation detected for {token_symbol}")
         else:
             logger.warning(f"No valid prices found for token: {token_symbol}")
 async def scan_liquidity_imbalances():
@@ -334,6 +336,7 @@ async def main():
     # Run data integrity check
     logger.info("Running data integrity check...")
     integrity_report = await check_data_integrity()
+    await analyze_single_token("WETH")
     
     # Save integrity report to file
     with open('data_integrity_report.txt', 'w') as f:
@@ -384,5 +387,43 @@ async def main():
     for trigger in triggers:
         logger.info(f"Trigger: {trigger}")
 
+async def analyze_single_token(token_symbol):
+    logger.info(f"Analyzing prices for {token_symbol}")
+    token_key = f"token:{token_symbol}"
+    token_data = redis_operation_with_retry(lambda: redis_client.hgetall(token_key))
+    if token_data is None or 'address' not in token_data:
+        logger.warning(f"Unable to find data for token: {token_symbol}")
+        return
+
+    token_address = token_data['address']
+    v2_pools = redis_operation_with_retry(lambda: redis_client.keys(f"uniswap_v2_pair:*:{token_address}:*"))
+    v3_pools = redis_operation_with_retry(lambda: redis_client.keys(f"uniswap_v3_pool:*:{token_address}:*"))
+    
+    if v2_pools is None or v3_pools is None:
+        logger.warning(f"Unable to retrieve pool data for {token_symbol}")
+        return
+
+    all_pools = v2_pools + v3_pools
+    logger.info(f"Found {len(all_pools)} pools for {token_symbol}")
+
+    for pool_key in all_pools:
+        pool_data = redis_operation_with_retry(lambda: redis_client.hgetall(pool_key))
+        if pool_data is None:
+            logger.warning(f"Unable to retrieve data for pool: {pool_key}")
+            continue
+
+        if 'v3_pool' in pool_key:
+            liquidity, sqrt_price_x96 = handle_v3_pool_data(pool_key, pool_data)
+            if liquidity is not None and sqrt_price_x96 is not None:
+                price = (Decimal(sqrt_price_x96) ** 2) / (2 ** 192)
+                logger.info(f"V3 Pool {pool_key}: Price = {price}, Liquidity = {liquidity}")
+        else:  # V2 pool
+            if 'price' in pool_data:
+                price = Decimal(pool_data['price'])
+                reserve0 = Decimal(pool_data.get('reserve0', '0'))
+                reserve1 = Decimal(pool_data.get('reserve1', '0'))
+                logger.info(f"V2 Pool {pool_key}: Price = {price}, Reserve0 = {reserve0}, Reserve1 = {reserve1}")
+            else:
+                logger.warning(f"No price data found for V2 pool: {pool_key}")
 if __name__ == "__main__":
     asyncio.run(main())
