@@ -1,0 +1,28 @@
+
+
+
+2. triggers.py
+
+Purpose: Scan for arbitrage opportunities
+Key Functions:
+
+Check for price deviations across pools
+Identify liquidity imbalances
+Log potential arbitrage opportunities
+
+
+
+3. sendtochain.py
+
+Purpose: Execute arbitrage transactions on-chain
+Key Functions:
+
+Simulate arbitrage paths
+Execute transactions using flash loans
+Calculate and report profits
+
+
+
+
+
+

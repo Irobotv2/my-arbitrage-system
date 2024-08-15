@@ -1,3 +1,7 @@
+https://etherscan.io/dex?filter=41#transactions
+Liquidity pools 
+
+
 Arbitrage System Improvement Plan
 1: redisinsertion.py
 
@@ -15,6 +19,9 @@ Key Functions:
 Fetch top tokens from Etherscan
 Retrieve token info and pool data for Uniswap V2 and V3
 Store data in Redis for quick access
+
+
+
 
 
 2. triggers.py

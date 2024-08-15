@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-UPDATE_INTERVAL = 60  # Update every 60 seconds
+UPDATE_INTERVAL = 0.1  # Update every 60 seconds
 
 # Initialize Redis
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
