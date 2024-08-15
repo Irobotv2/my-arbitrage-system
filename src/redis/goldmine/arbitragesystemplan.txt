@@ -1,4 +1,5 @@
 Arbitrage System Improvement Plan
+1: redisinsertion.py
 
 Data Integrity and Accuracy
 
@@ -8,6 +9,25 @@ Data Integrity and Accuracy
  Develop unit tests for data retrieval and storage functions
 
 
+Purpose: Populate Redis database with token and pool data
+Key Functions:
+
+Fetch top tokens from Etherscan
+Retrieve token info and pool data for Uniswap V2 and V3
+Store data in Redis for quick access
+
+
+2. triggers.py
+
+Purpose: Scan for arbitrage opportunities
+Key Functions:
+
+Check for price deviations across pools
+Identify liquidity imbalances
+Log potential arbitrage opportunities
+
+
+
 Trigger Detection Enhancement
 
  Refactor price deviation detection algorithm
@@ -15,6 +35,15 @@ Trigger Detection Enhancement
  Implement cross-version pool comparison (V2 vs V3)
  Add more sophisticated filters to reduce false positives
 
+
+3. sendtochain.py
+
+Purpose: Execute arbitrage transactions on-chain
+Key Functions:
+
+Simulate arbitrage paths
+Execute transactions using flash loans
+Calculate and report profits
 
 Path Finding Optimization
 
