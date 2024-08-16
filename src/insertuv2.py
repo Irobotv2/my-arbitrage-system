@@ -36,7 +36,7 @@ def fetch_v3_pairs_from_db(connection):
 
 def fetch_v2_pair(token0, token1):
     query = """
-    {
+    { 
       pairs(where: {token0: "%s", token1: "%s"}) {
         id
         token0 {
