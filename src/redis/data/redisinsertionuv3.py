@@ -1,221 +1,182 @@
-import asyncio
-import aiohttp
-import logging
-from decimal import Decimal
 import redis
+from web3 import Web3
+from web3.exceptions import ContractLogicError
 import json
-from datetime import datetime
+import math
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Connect to Ethereum network (replace with your provider URL)
+w3 = Web3(Web3.HTTPProvider('https://mainnet.infura.io/v3/0640f56f05a942d7a25cfeff50de344d'))
 
-# The Graph API setup for Uniswap V3
-GRAPH_API_KEY = 'bde86d5008a99eaf066b94e4cfcad7fc'
-GRAPH_API_URL = f'https://gateway.thegraph.com/api/{GRAPH_API_KEY}/subgraphs/id/4cKy6QQMc5tpfdx8yxfYeb9TLZmgLQe44ddW1G7NwkA6'
+# Uniswap V3 Factory contract address
+FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
 
-# Redis setup
+# Uniswap V3 Quoter contract address
+QUOTER_ADDRESS = '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6'
+
+# Uniswap V3 Factory ABI (only the getPool function)
+FACTORY_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "tokenA", "type": "address"},
+            {"internalType": "address", "name": "tokenB", "type": "address"},
+            {"internalType": "uint24", "name": "fee", "type": "uint24"}
+        ],
+        "name": "getPool",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+# Uniswap V3 Pool ABI (only the slot0 function)
+POOL_ABI = [
+    {
+        "inputs": [],
+        "name": "slot0",
+        "outputs": [
+            {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+            {"internalType": "int24", "name": "tick", "type": "int24"},
+            {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+            {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+            {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+            {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+            {"internalType": "bool", "name": "unlocked", "type": "bool"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+# Uniswap V3 Quoter ABI (only the quoteExactInputSingle function)
+QUOTER_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "tokenIn", "type": "address"},
+            {"internalType": "address", "name": "tokenOut", "type": "address"},
+            {"internalType": "uint24", "name": "fee", "type": "uint24"},
+            {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+            {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]
+
+# Create contract instances
+factory_contract = w3.eth.contract(address=FACTORY_ADDRESS, abi=FACTORY_ABI)
+quoter_contract = w3.eth.contract(address=QUOTER_ADDRESS, abi=QUOTER_ABI)
+
+# Connect to Redis
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
-# Retry configuration
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds
+# Fee tiers
+FEE_TIERS = [100, 500, 3000, 10000]
 
-async def check_api_connection():
-    query = """
-    {
-      _meta {
-        block {
-          number
-        }
-        deployment
-        hasIndexingErrors
-      }
-    }
-    """
+def get_pool_address(token_a, token_b, fee):
     try:
-        timeout = aiohttp.ClientTimeout(total=60)  # 60 seconds timeout
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(GRAPH_API_URL, json={'query': query}) as response:
-                if response.status != 200:
-                    logging.error(f"API check failed. Status: {response.status}")
-                    logging.error(f"Response content: {await response.text()}")
-                    return False
-                data = await response.json()
-                if '_meta' in data.get('data', {}):
-                    logging.info("API connection successful")
-                    return True
-                else:
-                    logging.error("API response doesn't contain expected data")
-                    return False
-    except Exception as e:
-        logging.error(f"Error checking API connection: {str(e)}")
-        return False
-async def get_random_pools():
-    query = """
-    {
-      pool100: liquidityPools(
-        first: 5,
-        where: {fees_: {feePercentage: 0.0001}}
-      ) {
-        ...poolFields
-      }
-      pool500: liquidityPools(
-        first: 5,
-        where: {fees_: {feePercentage: 0.0005}}
-      ) {
-        ...poolFields
-      }
-      pool3000: liquidityPools(
-        first: 5,
-        where: {fees_: {feePercentage: 0.003}}
-      ) {
-        ...poolFields
-      }
-      pool10000: liquidityPools(
-        first: 5,
-        where: {fees_: {feePercentage: 0.01}}
-      ) {
-        ...poolFields
-      }
-    }
+        pool_address = factory_contract.functions.getPool(token_a, token_b, fee).call()
+        return pool_address if pool_address != '0x0000000000000000000000000000000000000000' else None
+    except ContractLogicError:
+        return None
 
-    fragment poolFields on LiquidityPool {
-      id
-      inputTokens {
-        id
-        symbol
-        name
-        decimals
-      }
-      fees {
-        feePercentage
-      }
-      totalValueLockedUSD
-      inputTokenBalances
-      cumulativeVolumeUSD
-      cumulativeTotalRevenueUSD
-      createdTimestamp
+def get_token_symbol(token_address):
+    # This is a placeholder function. In a real-world scenario, you would
+    # query the token contract or use a token database to get the actual symbol.
+    token_symbols = {
+        '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2': 'WETH',
+        '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48': 'USDC',
+        '0x6B175474E89094C44Da98b954EedeAC495271d0F': 'DAI',
+        # Add more token addresses and their symbols here
     }
-    """
-    
-    # ... rest of the function remains the same
-    
-    for attempt in range(MAX_RETRIES):
-        try:
-            timeout = aiohttp.ClientTimeout(total=120)  # Increased timeout to 120 seconds
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(GRAPH_API_URL, json={'query': query}) as response:
-                    if response.status != 200:
-                        logging.error(f"Error querying The Graph API: Status {response.status}")
-                        logging.error(f"Response content: {await response.text()}")
-                        if attempt < MAX_RETRIES - 1:
-                            backoff_time = (2 ** attempt) * RETRY_DELAY
-                            logging.info(f"Retrying in {backoff_time} seconds...")
-                            await asyncio.sleep(backoff_time)
-                            continue
-                        return []
-                    data = await response.json()
-            
-            pools = []
-            for fee_tier in ['pool100', 'pool500', 'pool3000', 'pool10000']:
-                pools.extend(data.get('data', {}).get(fee_tier, []))
-            
-            if not pools:
-                logging.warning("No pools data found in the API response")
-            return pools
-        except asyncio.TimeoutError:
-            logging.error(f"Request timed out on attempt {attempt + 1}")
-        except aiohttp.ClientError as e:
-            logging.error(f"AIOHTTP ClientError on attempt {attempt + 1}: {str(e)}")
-        except Exception as e:
-            logging.error(f"Unexpected error on attempt {attempt + 1}: {str(e)}")
+    return token_symbols.get(token_address, token_address[:6])  # Return first 6 chars of address if symbol not found
+
+def get_slot0_data(pool_address):
+    pool_contract = w3.eth.contract(address=pool_address, abi=POOL_ABI)
+    return pool_contract.functions.slot0().call()
+
+def sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals):
+    price = (sqrt_price_x96 ** 2) / (2 ** 192)
+    decimal_adjustment = 10 ** (token1_decimals - token0_decimals)
+    return price * decimal_adjustment
+
+def get_quote(token_in, token_out, fee, amount_in):
+    try:
+        quote = quoter_contract.functions.quoteExactInputSingle(
+            token_in,
+            token_out,
+            fee,
+            amount_in,
+            0  # sqrtPriceLimitX96 (0 for no price limit)
+        ).call()
+        return quote
+    except ContractLogicError:
+        return None
+
+def fetch_and_store_pools(token_pairs, amount_in=1000000):  # Default 1 USDC (assuming 6 decimals)
+    for token_a, token_b in token_pairs:
+        token_a_symbol = get_token_symbol(token_a)
+        token_b_symbol = get_token_symbol(token_b)
+        pool_name = f"{token_a_symbol}/{token_b_symbol}"
+        pair_key = f"Uniswap V3:{pool_name}"
         
-        if attempt < MAX_RETRIES - 1:
-            backoff_time = (2 ** attempt) * RETRY_DELAY
-            logging.info(f"Retrying in {backoff_time} seconds...")
-            await asyncio.sleep(backoff_time)
-    
-    logging.error(f"Failed to fetch pools after {MAX_RETRIES} attempts")
-    return []
+        pool_exists = False
+        for fee in FEE_TIERS:
+            pool_address = get_pool_address(token_a, token_b, fee)
+            if pool_address:
+                fee_key = f"{pair_key}:Fee tier {fee}"
+                redis_client.set(fee_key, pool_address)
+                
+                # Fetch slot0 data
+                slot0_data = get_slot0_data(pool_address)
+                
+                # Convert sqrtPriceX96 to price
+                token0_decimals = 18  # Example: WETH has 18 decimals
+                token1_decimals = 6   # Example: USDC has 6 decimals
+                price = sqrt_price_x96_to_price(slot0_data[0], token0_decimals, token1_decimals)
+                
+                # Store slot0 data in Redis
+                slot0_key = f"{fee_key}:slot0"
+                slot0_data_dict = {
+                    "sqrtPriceX96": str(slot0_data[0]),
+                    "tick": str(slot0_data[1]),
+                    "observationIndex": str(slot0_data[2]),
+                    "observationCardinality": str(slot0_data[3]),
+                    "observationCardinalityNext": str(slot0_data[4]),
+                    "feeProtocol": str(slot0_data[5]),
+                    "unlocked": str(slot0_data[6]),
+                    "price": str(price)
+                }
+                redis_client.hset(slot0_key, mapping=slot0_data_dict)
+                
+                # Fetch and store quote
+                quote_a_to_b = get_quote(token_a, token_b, fee, amount_in)
+                quote_b_to_a = get_quote(token_b, token_a, fee, amount_in)
+                
+                quote_key = f"{fee_key}:quote"
+                quote_data = {
+                    f"{token_a_symbol}_to_{token_b_symbol}": str(quote_a_to_b) if quote_a_to_b else "N/A",
+                    f"{token_b_symbol}_to_{token_a_symbol}": str(quote_b_to_a) if quote_b_to_a else "N/A",
+                    "amount_in": str(amount_in)
+                }
+                redis_client.hset(quote_key, mapping=quote_data)
+                
+                pool_exists = True
 
-def is_valid_pool(pool):
-    return (len(pool['inputTokens']) == 2 and
-            all(token['symbol'].lower() != 'unknown' for token in pool['inputTokens']) and
-            pool['fees'] and len(pool['fees']) > 0)
+        # If any pool was found for this pair, add it to the main Uniswap V3 list
+        if pool_exists:
+            redis_client.sadd("Uniswap V3", pool_name)
 
-def insert_pool_data(pool):
-    token0, token1 = pool['inputTokens']
-    fee_tier = int(float(pool['fees'][0]['feePercentage']) * 10000)  # Convert to basis points
-    pool_key = f"Uniswap V3:{token0['symbol']}/{token1['symbol']}:{fee_tier}"
-    
-    pool_data = {
-        "pool_address": pool['id'],
-        "token0": json.dumps({
-            "address": token0['id'],
-            "symbol": token0['symbol'],
-            "name": token0['name'],
-            "decimals": token0['decimals']
-        }),
-        "token1": json.dumps({
-            "address": token1['id'],
-            "symbol": token1['symbol'],
-            "name": token1['name'],
-            "decimals": token1['decimals']
-        }),
-        "fee_tier": str(fee_tier),
-        "reserve0": pool['inputTokenBalances'][0],
-        "reserve1": pool['inputTokenBalances'][1],
-        "reserveUSD": pool['totalValueLockedUSD'],
-        "volume_24h": pool['cumulativeVolumeUSD'],
-        "fees_24h": pool['cumulativeTotalRevenueUSD'],
-        "created_at": pool['createdTimestamp'],
-        "last_updated": str(int(datetime.now().timestamp()))
-    }
-    
-    # Calculate token prices (this is an approximation)
-    reserve0 = float(pool['inputTokenBalances'][0])
-    reserve1 = float(pool['inputTokenBalances'][1])
-    if reserve0 > 0 and reserve1 > 0:
-        pool_data[f"{token0['symbol']}_price_in_{token1['symbol']}"] = str(reserve1 / reserve0)
-        pool_data[f"{token1['symbol']}_price_in_{token0['symbol']}"] = str(reserve0 / reserve1)
-    
-    redis_client.hset(pool_key, mapping=pool_data)
-    redis_client.expire(pool_key, 300)  # Set expiration for 5 minutes
+def main():
+    # Example token pairs (replace with your actual token addresses)
+    token_pairs = [
+        ('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'),  # WETH/USDC
+        ('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', '0x6B175474E89094C44Da98b954EedeAC495271d0F'),  # WETH/DAI
+        # Add more token pairs here
+    ]
 
-    # Log the information
-    logging.info(f"\nPool: {token0['symbol']} / {token1['symbol']} (Fee Tier: {fee_tier} bps)")
-    logging.info(f"Pool Address: {pool['id']}")
-    logging.info(f"TVL USD: ${Decimal(pool['totalValueLockedUSD']):.2f}")
-    logging.info(f"Fee Tier: {fee_tier} bps")
-    logging.info(f"Inserted pool data into Redis: {pool_key}")
-
-async def main():
-    logging.info("Starting the script...")
-    logging.info("Checking API connection...")
-    if not await check_api_connection():
-        logging.error("Failed to connect to the API. Exiting.")
-        return
-
-    logging.info("Clearing Redis database...")
-    redis_client.flushdb()
-    
-    logging.info("Fetching random Uniswap V3 pools across all fee tiers...")
-    all_pools = await get_random_pools()
-    
-    if not all_pools:
-        logging.error("Failed to fetch pools. Exiting.")
-        return
-
-    logging.info(f"Fetched {len(all_pools)} pools. Filtering valid pools...")
-    valid_pools = [pool for pool in all_pools if is_valid_pool(pool)]
-
-    logging.info(f"Successfully fetched {len(valid_pools)} valid pools.")
-    
-    for i, pool in enumerate(valid_pools, 1):
-        logging.info(f"Inserting pool {i} of {len(valid_pools)}...")
-        insert_pool_data(pool)
-    
-    logging.info("Script completed successfully.")
+    fetch_and_store_pools(token_pairs)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
