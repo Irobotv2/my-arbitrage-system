@@ -1053,3 +1053,10 @@ Plan for scaling the data collection process as more pools are added to Uniswap 
 By addressing these next steps, you'll be able to significantly improve the reliability and usefulness of the data collected for your arbitrage bot. The immediate focus should be on resolving the fee tier issue and increasing the volume and quality of data collected.
 
 44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444
+
+Can Cross-Chain MEV be Atomic?
+As web3 becomes increasingly multi-chain, these cross-chain MEV opportunities will become more popular and more interesting. However, atomicity is essential to MEV. For MEV opportunities to occur the cycle must be atomic: something happened, or it didn’t. The multi-chain world is not very atomic, which creates all sorts of opportunities for risks that can be difficult to understand, measure, and mitigate. 
+
+While bridging, as described above, is the classic way to do cross-chain transactions, transactions take too long to settle and thus become unpredictable. During settlement time, others can capture MEV opportunities before the bridged transactions are completed. Parallel-chain MEV offers a solution. 
+
+To execute parallel-chain MEV, you have assets on one chain and assets on another and execute them simultaneously to capture the arbitrage. These transactions settle more quickly because they are not interlinked. But there are some negative externalities: Parallel-chain MEV requires resources on each chain and hence represents a centralization vector. Said another way, those traders or actors with more resources will necessarily outperform others because of the need to spread resources across chains. 
