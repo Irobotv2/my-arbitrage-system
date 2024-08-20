@@ -3,9 +3,13 @@ from web3 import Web3
 import time
 import logging
 
-# Setup Web3 connection
-provider_url = 'http://localhost:8545'  # HTTP URL
-w3 = Web3(Web3.HTTPProvider(provider_url))
+# Setup Web3 connection for querying data (localhost)
+provider_url_localhost = 'http://localhost:8545'  # HTTP URL for local blockchain
+w3_local = Web3(Web3.HTTPProvider(provider_url_localhost))
+
+# Setup Web3 connection for executing transactions (different RPC)
+provider_url_exec = 'https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c'  # Replace with your external RPC URL
+w3_exec = Web3(Web3.HTTPProvider(provider_url_exec))
 
 # Define your wallet address and private key
 wallet_address = "0x19F5034FAB7e2CcA2Ad46EC28acF20cbd098D3fF"
@@ -212,12 +216,11 @@ FLASHLOAN_BUNDLE_EXECUTOR_ABI = [
         "type": "function"
     }
 ]
-# Create contract instances
-v2_pool_contract = w3.eth.contract(address=UNISWAP_V2_WBTC_WETH_POOL, abi=V2_POOL_ABI)
-v3_pool_contract = w3.eth.contract(address=UNISWAP_V3_WBTC_WETH_POOL, abi=V3_POOL_ABI)
-v2_router_contract = w3.eth.contract(address=UNISWAP_V2_ROUTER_ADDRESS, abi=V2_ROUTER_ABI)
-v3_router_contract = w3.eth.contract(address=UNISWAP_V3_ROUTER_ADDRESS, abi=V3_ROUTER_ABI)
-flashloan_contract = w3.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
+# Create contract instances for querying (using the local Web3 connection)
+v2_pool_contract = w3_local.eth.contract(address=UNISWAP_V2_WBTC_WETH_POOL, abi=V2_POOL_ABI)
+v2_router_contract = w3_exec.eth.contract(address=UNISWAP_V2_ROUTER_ADDRESS, abi=V2_ROUTER_ABI)
+v3_router_contract = w3_exec.eth.contract(address=UNISWAP_V3_ROUTER_ADDRESS, abi=V3_ROUTER_ABI)
+flashloan_contract = w3_exec.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
 
 # Connect to Redis
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
@@ -226,7 +229,7 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0)
 logging.basicConfig(level=logging.INFO)
 
 def get_token_decimals(token_address):
-    token_contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
+    token_contract = w3_local.eth.contract(address=token_address, abi=ERC20_ABI)
     return token_contract.functions.decimals().call()
 
 def get_wbtc_weth_price_v2():
@@ -249,7 +252,7 @@ def sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals):
     return price * decimal_adjustment
 
 def get_wbtc_weth_price_v3(pool_address):
-    v3_pool_contract = w3.eth.contract(address=pool_address, abi=V3_POOL_ABI)
+    v3_pool_contract = w3_local.eth.contract(address=pool_address, abi=V3_POOL_ABI)
     slot0_data = v3_pool_contract.functions.slot0().call()
     sqrt_price_x96 = slot0_data[0]
     token0_decimals = get_token_decimals('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2')
@@ -269,13 +272,12 @@ def monitor_arbitrage_opportunities():
 
             if price_v3 > price_v2 * 1.01:
                 logging.info(f"Arbitrage opportunity detected! Uniswap V3 ({fee_tier}) > Uniswap V2")
-                execute_arbitrage(pool_address, is_v2_to_v3=True, amount=w3.toWei(1, 'ether'))
+                execute_arbitrage(pool_address, is_v2_to_v3=True, amount=w3_exec.to_wei(1, 'ether'))
             elif price_v2 > price_v3 * 1.01:
                 logging.info(f"Arbitrage opportunity detected! Uniswap V2 > Uniswap V3 ({fee_tier})")
-                execute_arbitrage(pool_address, is_v2_to_v3=False, amount=w3.toWei(1, 'ether'))
+                execute_arbitrage(pool_address, is_v2_to_v3=False, amount=w3_exec.to_wei(1, 'ether'))
 
-        time.sleep(10)
-
+        time.sleep(0.1)
 
 def execute_arbitrage(v3_pool_address, is_v2_to_v3, amount):
     if is_v2_to_v3:
@@ -331,16 +333,16 @@ def execute_arbitrage(v3_pool_address, is_v2_to_v3, amount):
 
     tx = flashloan_contract.functions.initiateFlashLoanAndBundle(tokens, amounts, targets, payloads).buildTransaction({
         'from': wallet_address,
-        'nonce': w3.eth.getTransactionCount(wallet_address),
+        'nonce': w3_exec.eth.getTransactionCount(wallet_address),
         'gas': 3000000,
-        'gasPrice': w3.toWei('20', 'gwei'),
+        'gasPrice': w3_exec.to_wei('20', 'gwei'),
     })
 
-    signed_tx = w3.eth.account.signTransaction(tx, private_key=private_key)
-    tx_hash = w3.eth.sendRawTransaction(signed_tx.rawTransaction)
+    signed_tx = w3_exec.eth.account.signTransaction(tx, private_key=private_key)
+    tx_hash = w3_exec.eth.sendRawTransaction(signed_tx.rawTransaction)
     logging.info(f"Arbitrage transaction sent: {tx_hash.hex()}")
 
-    receipt = w3.eth.waitForTransactionReceipt(tx_hash)
+    receipt = w3_exec.eth.waitForTransactionReceipt(tx_hash)
     logging.info(f"Arbitrage transaction mined: {receipt.transactionHash.hex()}")
 
 
