@@ -2,6 +2,7 @@ import redis
 from web3 import Web3
 import time
 import logging
+from datetime import datetime, timedelta
 
 # Setup Web3 connection for querying data (localhost)
 provider_url_localhost = 'http://localhost:8545'  # HTTP URL for local blockchain
@@ -225,6 +226,13 @@ flashloan_contract = w3_exec.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDR
 # Connect to Redis
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
+# New global variables for opportunity tracking
+REPORT_INTERVAL = 2 * 60 * 60  # 2 hours in seconds
+DETECTION_THRESHOLD = 0.01  # 1% threshold for detecting opportunities
+EXECUTION_THRESHOLD = 0.015  # 1.5% threshold for executing arbitrage
+
+opportunities = []
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
@@ -261,7 +269,11 @@ def get_wbtc_weth_price_v3(pool_address):
     return price_v3
 
 def monitor_arbitrage_opportunities():
+    start_time = time.time()
+    last_report_time = start_time
+
     while True:
+        current_time = time.time()
         price_v2 = get_wbtc_weth_price_v2()
 
         for fee_tier, pool_address in v3_pools.items():
@@ -270,12 +282,44 @@ def monitor_arbitrage_opportunities():
             logging.info(f"Uniswap V2 Price: {price_v2} WETH per WBTC")
             logging.info(f"Uniswap V3 ({fee_tier}) Price: {price_v3} WETH per WBTC")
 
-            if price_v3 > price_v2 * 1.01:
-                logging.info(f"Arbitrage opportunity detected! Uniswap V3 ({fee_tier}) > Uniswap V2")
-                execute_arbitrage(pool_address, is_v2_to_v3=True, amount=w3_exec.to_wei(1, 'ether'))
-            elif price_v2 > price_v3 * 1.01:
-                logging.info(f"Arbitrage opportunity detected! Uniswap V2 > Uniswap V3 ({fee_tier})")
-                execute_arbitrage(pool_address, is_v2_to_v3=False, amount=w3_exec.to_wei(1, 'ether'))
+            # Check for opportunities
+            if price_v3 > price_v2 * (1 + DETECTION_THRESHOLD):
+                opportunity = {
+                    "timestamp": current_time,
+                    "type": "V2 to V3",
+                    "fee_tier": fee_tier,
+                    "price_v2": price_v2,
+                    "price_v3": price_v3,
+                    "profit_percentage": (price_v3 / price_v2 - 1) * 100
+                }
+                opportunities.append(opportunity)
+                logging.info(f"Opportunity detected: {opportunity}")
+
+                if price_v3 > price_v2 * (1 + EXECUTION_THRESHOLD):
+                    logging.info(f"Executing arbitrage: Uniswap V2 to Uniswap V3 ({fee_tier})")
+                    execute_arbitrage(pool_address, is_v2_to_v3=True, amount=w3_exec.to_wei(1, 'ether'))
+
+            elif price_v2 > price_v3 * (1 + DETECTION_THRESHOLD):
+                opportunity = {
+                    "timestamp": current_time,
+                    "type": "V3 to V2",
+                    "fee_tier": fee_tier,
+                    "price_v2": price_v2,
+                    "price_v3": price_v3,
+                    "profit_percentage": (price_v2 / price_v3 - 1) * 100
+                }
+                opportunities.append(opportunity)
+                logging.info(f"Opportunity detected: {opportunity}")
+
+                if price_v2 > price_v3 * (1 + EXECUTION_THRESHOLD):
+                    logging.info(f"Executing arbitrage: Uniswap V3 ({fee_tier}) to Uniswap V2")
+                    execute_arbitrage(pool_address, is_v2_to_v3=False, amount=w3_exec.to_wei(1, 'ether'))
+
+        # Check if it's time to generate a report
+        if current_time - last_report_time >= REPORT_INTERVAL:
+            generate_report(start_time, current_time)
+            last_report_time = current_time
+            opportunities.clear()  # Clear opportunities after reporting
 
         time.sleep(0.1)
 
@@ -345,6 +389,32 @@ def execute_arbitrage(v3_pool_address, is_v2_to_v3, amount):
     receipt = w3_exec.eth.waitForTransactionReceipt(tx_hash)
     logging.info(f"Arbitrage transaction mined: {receipt.transactionHash.hex()}")
 
+
+def generate_report(start_time, end_time):
+    report = f"Arbitrage Opportunity Report\n"
+    report += f"Time period: {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}\n\n"
+
+    if not opportunities:
+        report += "No opportunities detected during this period.\n"
+    else:
+        report += f"Total opportunities detected: {len(opportunities)}\n"
+        report += f"Opportunities exceeding execution threshold: {sum(1 for opp in opportunities if opp['profit_percentage'] >= EXECUTION_THRESHOLD * 100)}\n\n"
+
+        report += "Top 10 opportunities:\n"
+        top_opportunities = sorted(opportunities, key=lambda x: x['profit_percentage'], reverse=True)[:10]
+        for i, opp in enumerate(top_opportunities, 1):
+            report += f"{i}. {opp['type']} ({opp['fee_tier']})\n"
+            report += f"   Timestamp: {datetime.fromtimestamp(opp['timestamp'])}\n"
+            report += f"   V2 Price: {opp['price_v2']:.8f}\n"
+            report += f"   V3 Price: {opp['price_v3']:.8f}\n"
+            report += f"   Profit %: {opp['profit_percentage']:.2f}%\n\n"
+
+    logging.info("Generating report...")
+    logging.info(report)
+
+    # Save report to a file
+    with open(f"arbitrage_report_{int(end_time)}.txt", "w") as f:
+        f.write(report)
 
 if __name__ == "__main__":
     monitor_arbitrage_opportunities()
