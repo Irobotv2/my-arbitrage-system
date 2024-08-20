@@ -381,8 +381,7 @@ Trade Execution Service: For executing trades on the blockchain.
 
 
 
-prysm.bat beacon-chain --execution-endpoint=http://localhost:8551 --mainnet --jwt-secret=C:\ethereum_node\jwt.hex --checkpoint-sync-url=https://beaconstate.info --genesis-beacon-api-url=https://beaconstate.info
-
+ 
 
 C:\ethereum_node\consensus>prysm.bat beacon-chain --execution-endpoint=http://localhost:8551 --mainnet --jwt-secret=C:\ethereum_node\jwt.hex --checkpoint-sync-url=https://beaconstate.info --genesis-beacon-api-url=https://beaconstate.info
 
@@ -1060,3 +1059,45 @@ As web3 becomes increasingly multi-chain, these cross-chain MEV opportunities wi
 While bridging, as described above, is the classic way to do cross-chain transactions, transactions take too long to settle and thus become unpredictable. During settlement time, others can capture MEV opportunities before the bridged transactions are completed. Parallel-chain MEV offers a solution. 
 
 To execute parallel-chain MEV, you have assets on one chain and assets on another and execute them simultaneously to capture the arbitrage. These transactions settle more quickly because they are not interlinked. But there are some negative externalities: Parallel-chain MEV requires resources on each chain and hence represents a centralization vector. Said another way, those traders or actors with more resources will necessarily outperform others because of the need to spread resources across chains. 
+
+
+
+
+
+prysm.bat beacon-chain ^
+--execution-endpoint=http://localhost:8551 ^
+--mainnet ^
+--jwt-secret=C:\ethereum_node\jwt.hex ^
+--checkpoint-sync-url=https://beaconstate.info ^
+--genesis-beacon-api-url=https://beaconstate.info ^
+--accept-terms-of-use ^
+--datadir=C:\ethereum_node\consensus_data ^
+--rpc-host=0.0.0.0 ^
+--grpc-gateway-host=0.0.0.0 ^
+--monitoring-host=0.0.0.0 ^
+--p2p-max-peers=100 ^
+--grpc-max-msg-size=65568081 ^
+--disable-monitoring=false
+
+
+updated prysm command
+
+
+
+
+
+
+
+ Simulation or Algorithm
+The searcher almost certainly had a system in place that continuously monitored price discrepancies between Uniswap V2 and V3.
+This system likely included a simulator that could quickly calculate the expected outcome of swapping various amounts of WBTC to find the optimal trade size.
+The simulator would take into account:
+Current Prices: Real-time prices from both pools.
+Liquidity Levels: The available liquidity in each pool to ensure the trade wouldn't exceed what could be executed profitably.
+Gas Fees and Miner Bribes: Costs associated with executing the transaction, including potential bribes to miners for including the transaction quickly.
+
+Plan to Replicate
+Build a Similar Simulator: You would need to create or use a simulator that can calculate the potential profit for various amounts of WBTC based on real-time data.
+Consider Liquidity: Ensure your system accounts for the liquidity in each pool to avoid slippage that could eat into your profits.
+Optimize for Trade Size: Your simulator should be able to determine the optimal trade size (like 296 WBTC) that maximizes profit while minimizing risk.
+Automate Execution: Set up an automated system that can detect these opportunities and execute them in real-time, just like the searcher's bot did.
