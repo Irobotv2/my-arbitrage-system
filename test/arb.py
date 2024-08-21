@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 
 # Setup Web3 connection for querying data (localhost)
 provider_url_localhost = 'http://localhost:8545'  # HTTP URL for local blockchain
-w3_local = Web3(Web3.HTTPProvider(provider_url_localhost))
+w3_local = Web3(Web3.HTTPProvider(provider_url_localhost, request_kwargs={'timeout': 30}))
+
 
 # Setup Web3 connection for executing transactions (different RPC)
 provider_url_exec = 'https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c'  # Replace with your external RPC URL
