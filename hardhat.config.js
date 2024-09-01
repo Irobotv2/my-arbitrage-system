@@ -104,6 +104,11 @@ module.exports = {
       chainId: 1,
       accounts: [process.env.PRIVATE_KEY],
     },
+    mainnet: {
+      url: "https://mainnet.infura.io/v3/0640f56f05a942d7a25cfeff50de344d",
+      chainId: 1,
+      accounts: [process.env.PRIVATE_KEY],
+    },
   },
   tenderly: {
     project: "irobotv2",

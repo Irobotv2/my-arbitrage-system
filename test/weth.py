@@ -1,4 +1,3 @@
-#$flashloan100million$
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
@@ -17,6 +16,7 @@ private_key = '6d0ad7f50dccb88715e3592f39ea5be4c715531223b2daeb2de621dc8f6c230f'
 # FlashLoanBundleExecutor contract address
 contract_address = '0x26B7B5AB244114ab88578D5C4cD5b096097bf543'
 
+# ABI for the FlashLoanBundleExecutor contract
 FLASHLOAN_BUNDLE_EXECUTOR_ABI = [
     {
         "inputs": [
@@ -116,46 +116,16 @@ FLASHLOAN_BUNDLE_EXECUTOR_ABI = [
 # Contract instance
 flashloan_executor = w3.eth.contract(address=contract_address, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
 
-# Addresses
+# Address of the WETH token
 WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
-AAVE_ADDRESS = '0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9'
-aave_price_feed_address = '0x547a514d5e3769680Ce22B2361c10Ea13619e8a9'
 
-# ABI for Chainlink price feed
-price_feed_abi = [
-    {
-        "inputs": [],
-        "name": "latestAnswer",
-        "outputs": [{"internalType": "int256", "name": "", "type": "int256"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
-]
+# Flashloan parameters
+tokens = [WETH_ADDRESS]
+amounts = [w3.to_wei(3700, 'ether')]  # 3700 WETH
 
-# Price feed contract instance
-price_feed_contract = w3.eth.contract(address=aave_price_feed_address, abi=price_feed_abi)
-
-# Get AAVE price in USD
-aave_price = price_feed_contract.functions.latestAnswer().call()
-print(f"AAVE price (in cents): {aave_price}")
-
-# Calculate AAVE amount for $100 million
-one_hundred_million = 100_000_000 * 10**18
-aave_amount = (one_hundred_million * 10**8) // aave_price
-
-# Tokens and amounts
-tokens = [WETH_ADDRESS, AAVE_ADDRESS]
-amounts = [
-    w3.to_wei(3700, 'ether'),  # 3700 WETH
-    aave_amount  # $100 million worth of AAVE
-]
-
-# Sort tokens and amounts
-sorted_pairs = sorted(zip(tokens, amounts), key=lambda x: x[0].lower())
-tokens, amounts = zip(*sorted_pairs)
-
-targets = [wallet_address]  # Example target
-payloads = ["0x"]  # Empty payload
+# Example target and payload
+targets = [wallet_address]  # Example target (could be your contract or another address)
+payloads = ["0x"]  # Empty payload (replace with actual encoded data if needed)
 
 # Build the transaction
 try:

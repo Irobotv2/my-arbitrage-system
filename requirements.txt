@@ -22,7 +22,13 @@ To implement a high-frequency, optimized arbitrage system as described, you'll n
 
 
 
+How to send your first Flashbots bundle
+To access the Flashbots network you will need three things:
 
+A unique ECDSA-secp256k1 key pair for Flashbots to identify you
+A method to communicate with the Flashbots network
+Alchemy provides a convenient way to dispatch individual transactions to Flashbots.
+A "bundle" comprising your transactions
 
 
 
@@ -1101,3 +1107,147 @@ Build a Similar Simulator: You would need to create or use a simulator that can 
 Consider Liquidity: Ensure your system accounts for the liquidity in each pool to avoid slippage that could eat into your profits.
 Optimize for Trade Size: Your simulator should be able to determine the optimal trade size (like 296 WBTC) that maximizes profit while minimizing risk.
 Automate Execution: Set up an automated system that can detect these opportunities and execute them in real-time, just like the searcher's bot did.
+
+
+
+
+How does Conclusion Your script is structured well to identify and execute arbitrage opportunities between Uniswap V2 and V3 pools. The logic for detecting price differences, executing trades, and managing token approvals is sound. However, if Balancer integration is a goal, additional code would be necessary to handle that aspect. Overall, with some optimizations and careful monitoring, your script should be able to effectively carry out the intended arbitrage operations.
+How do i put all the pieces together
+
+I want to beable to borrow the money from balancer and execute if my custom pair configuration addresses cross exchnage are able to find an area of interest or a specific % difference it can execute cross eachnge. 
+
+I provided exactly how im storing it
+
+{"name": "stETH-WETH", "v2_pool": "0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4", "v3_pools": {"1.00%": {"address": "0x8f8eaaF88448ba31BdffF6aD8c42830c032C6392", "fee": 100}, "5.00%": {"address": "0xeacDF56d530a4ec6639c2C86F1915F4956446b5C", "fee": 500}, "30.00%": {"address": "0xF25B9F70F7e1d9a2968b42DE00efDA666Efb2de3", "fee": 3000}, "100.00%": {"address": "0x63818BbDd21E69bE108A23aC1E84cBf66399Bd7D", "fee": 10000}}, "token0": {"address": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84", "symbol": "stETH"}, "token1": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "symbol": "WETH"}}
+**
+
+Also if we analyze
+{"name": "stETH-WETH", "v2_pool": "0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4", "v3_pools": {"1.00%": {"address": "0x8f8eaaF88448ba31BdffF6aD8c42830c032C6392", "fee": 100}, 
+
+There is a 10 percent price difference. I need my system to recognize the price difference in the 10 % and calulcate the maximum liquidity amount between both of these. 
+If it finds the 10 % difference it then needs to ask the question for how much?
+
+Because it then needs to pull the balancer flashloan,
+
+Also if we analyze
+{"name": "stETH-WETH", "v2_pool": "0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4", "v3_pools": {"1.00%": {"address": "0x8f8eaaF88448ba31BdffF6aD8c42830c032C6392", "fee": 100}, 
+
+And also understand that if we are taking advantage of the price differences in this pool specifically it probably needs to  flashloan 
+WETH
+0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4
+Swap that weth on this address and output stETH
+
+0x8f8eaaF88448ba31BdffF6aD8c42830c032C6392
+
+Then tak ethat steth to uniswapv3 and output WETH
+
+We then need to take the final WETH amount and repay the initial balancer flashloan. 
+*
+
+My all configs needs to be doing this for every configuration it has in my redis database. It needs to understand which direction to go which coin to input and which coin to output based on the highest return for runni
+
+
+
+
+Uniswap token pairs refer to their tokens as token0 and token1; token0 being the one whose address is numerically less than the other (e.g. 0x0123 < 0x0234); so we need to discern which token of the pair's two tokens is WETH. Our getPairData function sets this in the isWETHZero field. If WETH is token0, then we'll trade token0 -> token1 on exchange A, then token1 -> token0 on exchange B. If WETH is token1, then we just switch "token0" with "token1" and apply the same formula.
+
+Offchain Searching
+The more data you can compute offchain, the less gas you have to spend. This gives you more ETH to tip with; better profit margins or a competitive edge.
+
+However, off-chain data is not always as accurate as on-chain data. This is because other transactions may affect the state of the blockchain (e.g. the price of a trading pair) if they are placed before your bundle in the block. The very first position in an upcoming block ("top of the block") is the only one that's guaranteed to match the state of the last block.
+
+Unless you're the block builder (or have privileged access to their orderflow), you have no way of knowing where in the block your transaction will be placed, so you have no way of knowing whether the off-chain state used to calculate your strategy's parameters (e.g. your trade amounts) is still accurate. You may add logic in your smart contract that reverts if the transaction isn't placed in the first position, which will guarantee that your information is accurate, but may lower your chances of being included, depending on the builder's transaction-sorting algorithm.
+
+
+
+Note: querying the blockchain can cost precious time -- a better design would be to store arb-ready pairs somewhere fast, like in memory or a fast DB, and only query the blockchain when a stored pair alternative can't be found
+
+Note that the Sushiswap factory uses the same ABI as the Uniswap contract. Sushiswap is just a Uniswap V2 clone, so we know that the code is the same, which means the ABIs are also the same.
+
+
+
+To break this down into actionable steps and create a plan for getting your Flashbots bundles included in blocks, here's what you need to do:
+
+1. Understand the Bundle Format
+Objective: Ensure that the transactions you're sending in a bundle are correctly formatted for Flashbots.
+
+Bundle Structure: A Flashbots bundle is an array of signed transactions that are submitted together. Each transaction must be valid and executable within the block it’s submitted to.
+
+Payloads: The payloads you send need to be correctly structured to ensure that the Flashbots builder can execute them without errors. This involves encoding the transaction data, including method calls and parameters.
+
+Testing: You can use Tenderly to simulate and debug these transactions, but when submitting to Flashbots, ensure the final payload is compatible with the Flashbots relay.
+
+2. Set Up the Environment
+Objective: Ensure your environment is correctly configured to send bundles to the Flashbots relay.
+
+Web3 Provider for Flashbots: Use a provider connected to the Ethereum mainnet (e.g., Infura) and the Flashbots relay endpoint (https://relay.flashbots.net).
+
+Flashbots Relay URL: Update your submission endpoint to Flashbots relay to ensure your bundles are reaching the correct network.
+
+Tenderly for Debugging: Continue using Tenderly’s virtual mainnet for debugging and simulating the transactions, ensuring they’ll work when submitted to Flashbots.
+
+3. Create and Sign Transactions
+Objective: Properly create and sign the transactions to be included in your Flashbots bundle.
+
+Flash Loan Contract: Ensure the contract is properly deployed and functional on the Ethereum mainnet.
+
+Transaction Creation: For each arbitrage opportunity, generate the necessary transactions (e.g., approve tokens, swap tokens, repay flash loan).
+
+Signing: Each transaction must be signed with the appropriate private key.
+
+4. Bundle the Transactions
+Objective: Package the signed transactions into a bundle.
+
+Bundle Format: Use the Flashbots Python library to package your signed transactions into a bundle.
+
+Simulation (Optional): Before submission, simulate the bundle using Flashbots’ tools to ensure it won’t revert. This can be done using the simulate method provided by Flashbots.
+
+5. Submit the Bundle
+Objective: Submit your bundle to the Flashbots relay for inclusion in a block.
+
+Target Block: Specify the block number for which you want the bundle included.
+
+Submission: Use the send_bundle method to submit your signed and packaged bundle to the Flashbots relay.
+
+6. Monitor and Debug
+Objective: Monitor the inclusion of your bundle and debug if necessary.
+
+Inclusion Monitoring: Check the Ethereum mainnet to see if your bundle was included in the specified block.
+
+Debugging Failed Bundles: If the bundle isn’t included, use Tenderly to debug the transactions and identify any issues.
+
+7. Refine and Iterate
+Objective: Refine your process based on outcomes and repeat the process.
+
+Adjustment: Based on the results, adjust your gas prices, transaction parameters, or any other variables.
+
+Iteration: Repeat the process with new arbitrage opportunities or different parameters until you consistently get bundles included in blocks.
+
+Plan to Get Included in Blocks
+Format Transactions: Make sure your transactions are correctly formatted and include all necessary steps (e.g., token approvals, swaps, flash loan repayments).
+
+Setup Submission Endpoint: Configure your submission endpoint to use Flashbots relay URL (https://relay.flashbots.net).
+
+Create and Sign Transactions: Generate and sign all required transactions for the arbitrage opportunity.
+
+Bundle Transactions: Use the Flashbots library to bundle your signed transactions.
+
+Simulate (Optional): Run simulations to ensure the bundle is valid and profitable.
+
+Submit Bundle: Submit the bundle to Flashbots for the target block number.
+
+Monitor Inclusion: Track whether the bundle was included in the block.
+
+Debug and Refine: If the bundle fails, use Tenderly and Flashbots tools to debug, then refine your approach.
+
+By following these steps, you'll have a clear pathway towards successfully submitting and getting your bundles included in blocks using Flashbots.
+
+
+
+
+
+
+
+
+
+b9ecd3f2-6ea8-47ab-88be-74f78bcb48eb api key for ENSO
