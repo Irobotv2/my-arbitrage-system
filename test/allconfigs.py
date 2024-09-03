@@ -178,24 +178,54 @@ def get_token_decimals(token_address):
     return token_contract.functions.decimals().call()
 
 def sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals):
-    price = (sqrt_price_x96 ** 2) / (2 ** 192)
-    decimal_adjustment = 10 ** (token1_decimals - token0_decimals)
-    return price * decimal_adjustment
-
+    try:
+        sqrt_price = Decimal(sqrt_price_x96) / Decimal(2 ** 96)
+        price = sqrt_price ** 2
+        decimal_adjustment = Decimal(10 ** (token1_decimals - token0_decimals))
+        adjusted_price = price * decimal_adjustment
+        
+        logging.info(f"V3 Price Calculation: sqrt_price_x96={sqrt_price_x96}, "
+                     f"sqrt_price={sqrt_price}, price={price}, "
+                     f"decimal_adjustment={decimal_adjustment}, adjusted_price={adjusted_price}")
+        
+        if adjusted_price <= 0:
+            logging.warning(f"V3 Price is zero or negative: {adjusted_price}")
+        
+        return float(adjusted_price)
+    except Exception as e:
+        logging.error(f"Error calculating V3 price: {str(e)}")
+        return None
 def get_price_v2(pool_contract, token0_decimals, token1_decimals):
-    reserves = pool_contract.functions.getReserves().call()
-    reserve0 = reserves[0]
-    reserve1 = reserves[1]
-    
-    normalized_reserve0 = reserve0 / (10 ** token0_decimals)
-    normalized_reserve1 = reserve1 / (10 ** token1_decimals)
+    try:
+        reserves = pool_contract.functions.getReserves().call()
+        reserve0 = Decimal(reserves[0])
+        reserve1 = Decimal(reserves[1])
+        
+        normalized_reserve0 = reserve0 / Decimal(10 ** token0_decimals)
+        normalized_reserve1 = reserve1 / Decimal(10 ** token1_decimals)
 
-    return normalized_reserve1 / normalized_reserve0
+        price = normalized_reserve1 / normalized_reserve0
+        
+        logging.info(f"V2 Price Calculation: reserve0={reserve0}, reserve1={reserve1}, "
+                     f"normalized_reserve0={normalized_reserve0}, normalized_reserve1={normalized_reserve1}, "
+                     f"price={price}")
+        
+        if price <= 0:
+            logging.warning(f"V2 Price is zero or negative: {price}")
+        
+        return float(price)
+    except Exception as e:
+        logging.error(f"Error calculating V2 price: {str(e)}")
+        return None
 
 def get_price_v3(pool_contract, token0_decimals, token1_decimals):
-    slot0_data = pool_contract.functions.slot0().call()
-    sqrt_price_x96 = slot0_data[0]
-    return sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals)
+    try:
+        slot0_data = pool_contract.functions.slot0().call()
+        sqrt_price_x96 = slot0_data[0]
+        return sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals)
+    except Exception as e:
+        logging.error(f"Error getting V3 slot0 data: {str(e)}")
+        return None
 
 def sort_tokens(token_a, token_b):
     return (token_a, token_b) if token_a.lower() < token_b.lower() else (token_b, token_a)
@@ -491,6 +521,63 @@ FLASH_LOAN_FEE = Decimal('0.0009')  # 0.09% fee for flash loans
 # Calculate gas cost
 GAS_COST = w3_exec.to_wei(GAS_PRICE, 'gwei') * GAS_LIMIT
 
+def format_arbitrage_opportunity(config, price_v2, price_v3, fee_tier, profit_percentage):
+    """
+    Format arbitrage opportunity information in a clear, readable manner.
+    """
+    v2_price = Decimal(str(price_v2)) if price_v2 is not None else Decimal('0')
+    v3_price = Decimal(str(price_v3)) if price_v3 is not None else Decimal('0')
+    
+    arbitrage_type = "V2 to V3" if v3_price > v2_price else "V3 to V2"
+    buy_price = min(v2_price, v3_price)
+    sell_price = max(v2_price, v3_price)
+    
+    output = f"\nArbitrage Opportunity Detected:\n"
+    output += f"Pair: {config['name']}\n"
+    output += f"Type: {arbitrage_type}\n"
+    output += f"Exchange Prices:\n"
+    output += f"  Uniswap V2: {v2_price:.8f}\n"
+    output += f"  Uniswap V3 ({fee_tier}): {v3_price:.8f}\n"
+    output += f"Buy at:  {buy_price:.8f} on {'Uniswap V3' if arbitrage_type == 'V3 to V2' else 'Uniswap V2'}\n"
+    output += f"Sell at: {sell_price:.8f} on {'Uniswap V2' if arbitrage_type == 'V3 to V2' else 'Uniswap V3'}\n"
+    output += f"Profit Percentage: {profit_percentage:.4f}%\n"
+    
+    return output
+
+def check_v2_pool_exists(pool_address):
+    try:
+        v2_pool_contract = w3_local.eth.contract(address=pool_address, abi=V2_POOL_ABI)
+        reserves = v2_pool_contract.functions.getReserves().call()
+        logging.info(f"V2 Pool {pool_address} exists with reserves: {reserves}")
+        return True
+    except Exception as e:
+        logging.error(f"Error checking V2 pool {pool_address}: {str(e)}")
+        return False
+
+def check_v3_pool_liquidity(pool_address):
+    v3_pool_contract = w3_local.eth.contract(address=pool_address, abi=V3_POOL_ABI)
+    liquidity = v3_pool_contract.functions.liquidity().call()
+    logging.info(f"V3 Pool {pool_address} liquidity: {liquidity}")
+    return liquidity
+
+def validate_v3_price(price, fee_tier):
+    if price is None:
+        logging.warning(f"V3 price is None for {fee_tier} fee tier")
+        return None
+    if price < 1e-10 or price > 1e10:
+        logging.warning(f"Unusual V3 price for {fee_tier} fee tier: {price}")
+        return None
+    return price
+
+def is_valid_arbitrage_opportunity(price_v2, price_v3, profit_percentage):
+    if price_v2 is None or price_v3 is None:
+        return False
+    if price_v2 <= 0 or price_v3 <= 0:
+        return False
+    if abs(profit_percentage) > 10:  # Adjust this threshold as needed
+        logging.warning(f"Unusually high profit percentage: {profit_percentage}%")
+        return False
+    return True
 def monitor_arbitrage_opportunities():
     start_time = time.time()
     last_report_time = start_time
@@ -515,30 +602,19 @@ def monitor_arbitrage_opportunities():
                 v3_pool_contract = w3_local.eth.contract(address=pool_info['address'], abi=V3_POOL_ABI)
                 price_v3 = get_price_v3(v3_pool_contract, token0_decimals, token1_decimals)
 
-                logging.info(f"{config['name']} - Uniswap V2 Price: {price_v2}")
-                logging.info(f"{config['name']} - Uniswap V3 ({fee_tier}) Price: {price_v3}")
-
-                if price_v2:  # Only check for arbitrage if V2 pool exists
+                if price_v2 is not None and price_v3 is not None:
                     # Calculate profit percentage
                     profit_percentage = calculate_profit_percentage(price_v2, price_v3, GAS_COST, FLASH_LOAN_FEE)
 
-                    opportunity = {
-                        "timestamp": current_time,
-                        "pair": config['name'],
-                        "type": "V2 to V3" if price_v3 > price_v2 else "V3 to V2",
-                        "fee_tier": fee_tier,
-                        "price_v2": price_v2,
-                        "price_v3": price_v3,
-                        "profit_percentage": profit_percentage
-                    }
-
                     if abs(profit_percentage) > DETECTION_THRESHOLD:
-                        opportunities.append(opportunity)
-                        logging.info(f"Opportunity detected: {opportunity}")
+                        opportunity_info = format_arbitrage_opportunity(config, price_v2, price_v3, fee_tier, profit_percentage)
+                        logging.info(opportunity_info)
 
                         if abs(profit_percentage) > EXECUTION_THRESHOLD:
-                            logging.info(f"Executing arbitrage: {config['name']} - {opportunity['type']} ({fee_tier})")
+                            logging.info(f"Executing arbitrage: {config['name']} - {'V2 to V3' if price_v3 > price_v2 else 'V3 to V2'} ({fee_tier})")
                             execute_arbitrage(config, pool_info, is_v2_to_v3=(price_v3 > price_v2), price_difference=abs(profit_percentage))
+                else:
+                    logging.warning(f"Unable to calculate prices for {config['name']}: V2 Price = {price_v2}, V3 Price = {price_v3}")
 
         # Check if it's time to generate a report
         if current_time - last_report_time >= REPORT_INTERVAL:
@@ -547,6 +623,8 @@ def monitor_arbitrage_opportunities():
             opportunities.clear()  # Clear opportunities after reporting
 
         time.sleep(0.1)  # Small delay to prevent overwhelming the system
+
+# Make sure to call this function in your main execution block
 def generate_report(start_time, end_time):
     report = f"Arbitrage Opportunity Report\n"
     report += f"Time period: {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}\n\n"
@@ -575,7 +653,7 @@ def generate_report(start_time, end_time):
 
 # Replace your existing main execution block with this one
 if __name__ == "__main__":
-    main_logger.info("Starting multi-pair arbitrage bot...")
+    main_logger.info("Starting multi-pair arbitrage bot with integrated diagnostics...")
     while True:
         try:
             monitor_arbitrage_opportunities()

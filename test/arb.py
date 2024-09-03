@@ -1,40 +1,50 @@
+import redis
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
-import redis
+from eth_account import Account
 import json
-import time
 import logging
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
+import time
+from decimal import Decimal
+from flashbots import flashbot
+from eth_account.signers.local import LocalAccount
+import uuid
 
-# Initialize Web3
-provider_url_exec = 'https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c'
-w3_exec = Web3(Web3.HTTPProvider(provider_url_exec))
-w3_exec.middleware_onion.inject(geth_poa_middleware, layer=0)
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define your wallet address and private key
-wallet_address = "0x19F5034FAB7e2CcA2Ad46EC28acF20cbd098D3fF"
-private_key = "6d0ad7f50dccb88715e3592f39ea5be4c715531223b2daeb2de621dc8f6c230f"
+# Connect to Redis
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
-# Define contract addresses
-FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS = "0x26B7B5AB244114ab88578D5C4cD5b096097bf543"
+# Setup Web3 connection to Ganache fork
+GANACHE_RPC_URL = 'http://localhost:8549'
+w3 = Web3(Web3.HTTPProvider(GANACHE_RPC_URL))
+w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+# Setup Flashbots
+FLASHBOTS_RELAY_URL = "https://relay.flashbots.net"  # Use your local Flashbots relay URL
+
+# Generate a new signer account for Flashbots
+flashbots_signer: LocalAccount = Account.create()
+logging.info(f"Generated Flashbots signer address: {flashbots_signer.address}")
+
+# Setup Flashbots with the new signer
+flashbot(w3, flashbots_signer, FLASHBOTS_RELAY_URL)
+
+# Define your wallet address (this should be one of the unlocked accounts in Ganache)
+wallet_address = "0x66C2C4152dDc970229938883E2d1527de81afBb8"
+private_key = "0x92f8463eb1cb10d0b497c44f5b9ef2dc259992630f5ac44ba881fcafe712b43d"
+
+# Update the contract address with the new one deployed on Ganache
+FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS = "0xd14afA25E813eE58AE81Ee0a29BB7e41E7a7e336"
+
+# Define other contract addresses
 UNISWAP_V2_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"
-WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
 
+# ABIs
 V2_POOL_ABI = [
-    {
-        "constant": True,
-        "inputs": [],
-        "name": "getReserves",
-        "outputs": [
-            {"internalType": "uint112", "name": "_reserve0", "type": "uint112"},
-            {"internalType": "uint112", "name": "_reserve1", "type": "uint112"},
-            {"internalType": "uint32", "name": "_blockTimestampLast", "type": "uint32"}
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    }
+    {"inputs":[],"name":"getReserves","outputs":[{"internalType":"uint112","name":"_reserve0","type":"uint112"},{"internalType":"uint112","name":"_reserve1","type":"uint112"},{"internalType":"uint32","name":"_blockTimestampLast","type":"uint32"}],"stateMutability":"view","type":"function"},
 ]
 
 V2_ROUTER_ABI = [
@@ -55,28 +65,8 @@ V2_ROUTER_ABI = [
 ]
 
 V3_POOL_ABI = [
-    {
-        "inputs": [],
-        "name": "slot0",
-        "outputs": [
-            {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
-            {"internalType": "int24", "name": "tick", "type": "int24"},
-            {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
-            {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
-            {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
-            {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
-            {"internalType": "bool", "name": "unlocked", "type": "bool"}
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "liquidity",
-        "outputs": [{"internalType": "uint128", "name": "", "type": "uint128"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
+    {"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"uint8","name":"feeProtocol","type":"uint8"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"liquidity","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},
 ]
 
 V3_ROUTER_ABI = [
@@ -141,20 +131,13 @@ ERC20_ABI = [
 ]
 
 # Create contract instances
-flashloan_contract = w3_exec.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
-v2_router_contract = w3_exec.eth.contract(address=UNISWAP_V2_ROUTER_ADDRESS, abi=V2_ROUTER_ABI)
-v3_router_contract = w3_exec.eth.contract(address=UNISWAP_V3_ROUTER_ADDRESS, abi=V3_ROUTER_ABI)
+v2_router_contract = w3.eth.contract(address=UNISWAP_V2_ROUTER_ADDRESS, abi=V2_ROUTER_ABI)
+v3_router_contract = w3.eth.contract(address=UNISWAP_V3_ROUTER_ADDRESS, abi=V3_ROUTER_ABI)
+flashloan_contract = w3.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
-main_logger = logging.getLogger('main_logger')
-
-# Connect to Redis
-redis_client = redis.Redis(host='localhost', port=6379, db=0)
-
-# Global variables
-DETECTION_THRESHOLD = 0.005  # 0.5% threshold for detecting opportunities
-EXECUTION_THRESHOLD = 0.01   # 1% threshold for executing arbitrage
+# Constants
+EXECUTION_THRESHOLD = 0.02  # 2% threshold for executing arbitrage
+USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
 
 def load_configurations_from_redis():
     configs = {}
@@ -165,173 +148,192 @@ def load_configurations_from_redis():
     return configs
 
 def get_token_decimals(token_address):
-    token_contract = w3_exec.eth.contract(address=token_address, abi=ERC20_ABI)
+    token_contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
     return token_contract.functions.decimals().call()
 
 def sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals):
-    price = (sqrt_price_x96 ** 2) / (2 ** 192)
-    decimal_adjustment = 10 ** (token1_decimals - token0_decimals)
-    return price * decimal_adjustment
+    sqrt_price = Decimal(sqrt_price_x96) / Decimal(2 ** 96)
+    price = sqrt_price ** 2
+    decimal_adjustment = Decimal(10 ** (token1_decimals - token0_decimals))
+    return float(price * decimal_adjustment)
 
 def get_price_v2(pool_contract, token0_decimals, token1_decimals):
-    reserves = pool_contract.functions.getReserves().call()
-    reserve0 = reserves[0]
-    reserve1 = reserves[1]
-    
-    normalized_reserve0 = reserve0 / (10 ** token0_decimals)
-    normalized_reserve1 = reserve1 / (10 ** token1_decimals)
+    try:
+        reserves = pool_contract.functions.getReserves().call()
+        reserve0 = Decimal(reserves[0])
+        reserve1 = Decimal(reserves[1])
+        
+        normalized_reserve0 = reserve0 / Decimal(10 ** token0_decimals)
+        normalized_reserve1 = reserve1 / Decimal(10 ** token1_decimals)
 
-    return normalized_reserve1 / normalized_reserve0
+        return float(normalized_reserve1 / normalized_reserve0)
+    except Exception as e:
+        logging.error(f"Error calculating V2 price: {str(e)}")
+        return None
 
 def get_price_v3(pool_contract, token0_decimals, token1_decimals):
-    slot0_data = pool_contract.functions.slot0().call()
-    sqrt_price_x96 = slot0_data[0]
-    return sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals)
+    try:
+        slot0_data = pool_contract.functions.slot0().call()
+        sqrt_price_x96 = slot0_data[0]
+        return sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals)
+    except Exception as e:
+        logging.error(f"Error getting V3 slot0 data: {str(e)}")
+        return None
 
-def sort_tokens(token_a, token_b):
-    return (token_a, token_b) if token_a.lower() < token_b.lower() else (token_b, token_a)
+def calculate_arbitrage(price_v2, price_v3):
+    if price_v2 > price_v3:
+        return (price_v2 / price_v3 - 1) * 100, "V3 to V2"
+    else:
+        return (price_v3 / price_v2 - 1) * 100, "V2 to V3"
 
-def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, flash_loan_amount):
+def execute_arbitrage(config, v3_pool_info, direction, price_difference):
     token0_address = config['token0']['address']
     token1_address = config['token1']['address']
     
-    sorted_tokens = sort_tokens(token0_address, token1_address)
-    slippage = 0.005
-    min_amount_out = int(flash_loan_amount * (1 - slippage))
-    deadline = int(time.time()) + 60 * 2  # 2-minute deadline
-
-    if is_v2_to_v3:
-        targets = [UNISWAP_V2_ROUTER_ADDRESS, UNISWAP_V3_ROUTER_ADDRESS]
-        
-        v2_swap_payload = v2_router_contract.encodeABI(
-            fn_name="swapExactTokensForTokens",
-            args=[
-                flash_loan_amount, 
-                min_amount_out,
-                sorted_tokens, 
-                FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
-                deadline
-            ]
-        )
-        
-        v3_swap_payload = v3_router_contract.encodeABI(
-            fn_name="exactInputSingle",
-            args=[{
-                'tokenIn': sorted_tokens[1],
-                'tokenOut': sorted_tokens[0],
-                'fee': v3_pool_info['fee'],
-                'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
-                'deadline': deadline,
-                'amountIn': flash_loan_amount,
-                'amountOutMinimum': min_amount_out,
-                'sqrtPriceLimitX96': 0,
-            }]
-        )
-
-        payloads = [v2_swap_payload, v3_swap_payload]
-
+    # Determine which token is USDC
+    if token0_address == USDC_ADDRESS:
+        usdc_is_token0 = True
+        other_token_address = token1_address
+    elif token1_address == USDC_ADDRESS:
+        usdc_is_token0 = False
+        other_token_address = token0_address
     else:
-        targets = [UNISWAP_V3_ROUTER_ADDRESS, UNISWAP_V2_ROUTER_ADDRESS]
+        logging.error("USDC is not part of this pair")
+        return
+
+    # Calculate flash loan amount (use a fraction of the pool's liquidity)
+    v3_pool_contract = w3.eth.contract(address=v3_pool_info['address'], abi=V3_POOL_ABI)
+    liquidity = v3_pool_contract.functions.liquidity().call()
+    flash_loan_amount = int(liquidity * 0.01)  # Use 1% of the pool's liquidity
+
+    deadline = int(time.time()) + 300  # 5 minutes from now
+
+    # Prepare swap parameters
+    if direction == "V3 to V2":
+        v3_params = {
+            'tokenIn': USDC_ADDRESS,
+            'tokenOut': other_token_address,
+            'fee': v3_pool_info['fee'],
+            'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
+            'deadline': deadline,
+            'amountIn': flash_loan_amount,
+            'amountOutMinimum': 0,
+            'sqrtPriceLimitX96': 0
+        }
+        v3_swap_payload = v3_router_contract.encodeABI(fn_name="exactInputSingle", args=[v3_params])
         
-        v3_swap_payload = v3_router_contract.encodeABI(
-            fn_name="exactInputSingle",
-            args=[{
-                'tokenIn': sorted_tokens[0],
-                'tokenOut': sorted_tokens[1],
-                'fee': v3_pool_info['fee'],
-                'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
-                'deadline': deadline,
-                'amountIn': flash_loan_amount,
-                'amountOutMinimum': min_amount_out,
-                'sqrtPriceLimitX96': 0,
-            }]
-        )
-        
+        v2_path = [other_token_address, USDC_ADDRESS]
         v2_swap_payload = v2_router_contract.encodeABI(
             fn_name="swapExactTokensForTokens",
-            args=[
-                flash_loan_amount, 
-                min_amount_out,
-                list(reversed(sorted_tokens)),
-                FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
-                deadline
-            ]
+            args=[0, 0, v2_path, FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, deadline]
         )
+    else:  # V2 to V3
+        v2_path = [USDC_ADDRESS, other_token_address]
+        v2_swap_payload = v2_router_contract.encodeABI(
+            fn_name="swapExactTokensForTokens",
+            args=[flash_loan_amount, 0, v2_path, FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, deadline]
+        )
+        
+        v3_params = {
+            'tokenIn': other_token_address,
+            'tokenOut': USDC_ADDRESS,
+            'fee': v3_pool_info['fee'],
+            'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS,
+            'deadline': deadline,
+            'amountIn': 0,
+            'amountOutMinimum': 0,
+            'sqrtPriceLimitX96': 0
+        }
+        v3_swap_payload = v3_router_contract.encodeABI(fn_name="exactInputSingle", args=[v3_params])
 
-        payloads = [v3_swap_payload, v2_swap_payload]
+    # Prepare flash loan parameters
+    tokens = [USDC_ADDRESS]
+    amounts = [flash_loan_amount]
+    targets = [UNISWAP_V2_ROUTER_ADDRESS, UNISWAP_V3_ROUTER_ADDRESS]
+    payloads = [v2_swap_payload, v3_swap_payload]
 
+    # Execute flash loan
     try:
-        # Build and execute the flashloan with bundled operations
-        nonce = w3_exec.eth.get_transaction_count(wallet_address)
+        nonce = w3.eth.get_transaction_count(wallet_address)
+        gas_price = w3.eth.gas_price
+
         transaction = flashloan_contract.functions.initiateFlashLoanAndBundle(
-            [token0_address], [flash_loan_amount], targets, payloads
+            tokens, amounts, targets, payloads
         ).build_transaction({
             'from': wallet_address,
             'nonce': nonce,
-            'gas': 3000000,
-            'gasPrice': w3_exec.to_wei('20', 'gwei')
+            'gas': 1000000,  # Adjust as needed
+            'gasPrice': gas_price,
         })
 
-        signed_tx = w3_exec.eth.account.sign_transaction(transaction, private_key=private_key)
-        tx_hash = w3_exec.eth.send_raw_transaction(signed_tx.rawTransaction)
+        # Sign the transaction
+        signed_txn = w3.eth.account.sign_transaction(transaction, private_key=private_key)
 
-        main_logger.info(f"Arbitrage transaction sent. Hash: {tx_hash.hex()}")
-        
-        # Wait for the transaction receipt
-        receipt = w3_exec.eth.wait_for_transaction_receipt(tx_hash)
-        if receipt.status == 1:
-            main_logger.info(f"Arbitrage transaction confirmed. Hash: {tx_hash.hex()}")
+        # Create a Flashbots bundle
+        bundle = [
+            {"signed_transaction": signed_txn.rawTransaction}
+        ]
+
+        # Simulate the bundle
+        simulation = w3.flashbots.simulate(bundle, block_tag='latest')
+
+        if simulation.get("error"):
+            logging.error(f"Bundle simulation failed: {simulation['error']}")
+            return
+
+        # Send the bundle
+        replacement_uuid = str(uuid.uuid4())
+        send_result = w3.flashbots.send_bundle(
+            bundle,
+            target_block_number=w3.eth.block_number + 1,
+            opts={"replacement_uuid": replacement_uuid}
+        )
+
+        # Wait for the transaction to be mined
+        receipts = send_result.wait()
+        if receipts:
+            logging.info(f"Arbitrage transaction successful. Gas used: {receipts[0].gasUsed}")
         else:
-            main_logger.error("Arbitrage execution failed.")
+            logging.error("Arbitrage transaction failed or not mined")
 
     except Exception as e:
-        main_logger.error(f"Error executing flashloan arbitrage: {str(e)}", exc_info=True)
+        logging.error(f"Error executing arbitrage: {str(e)}")
+
 
 def monitor_arbitrage_opportunities():
     configurations = load_configurations_from_redis()
 
     while True:
         for config_key, config in configurations.items():
-            token0_address = config['token0']['address']
-            token1_address = config['token1']['address']
-            token0_decimals = get_token_decimals(token0_address)
-            token1_decimals = get_token_decimals(token1_address)
+            if USDC_ADDRESS not in [config['token0']['address'], config['token1']['address']]:
+                continue  # Skip pairs that don't include USDC
+
+            token0_decimals = get_token_decimals(config['token0']['address'])
+            token1_decimals = get_token_decimals(config['token1']['address'])
 
             if config['v2_pool']:
-                v2_pool_contract = w3_exec.eth.contract(address=config['v2_pool'], abi=V2_POOL_ABI)
+                v2_pool_contract = w3.eth.contract(address=config['v2_pool'], abi=V2_POOL_ABI)
                 price_v2 = get_price_v2(v2_pool_contract, token0_decimals, token1_decimals)
             else:
                 price_v2 = None
 
             for fee_tier, pool_info in config['v3_pools'].items():
-                v3_pool_contract = w3_exec.eth.contract(address=pool_info['address'], abi=V3_POOL_ABI)
+                v3_pool_contract = w3.eth.contract(address=pool_info['address'], abi=V3_POOL_ABI)
                 price_v3 = get_price_v3(v3_pool_contract, token0_decimals, token1_decimals)
 
-                logging.info(f"{config['name']} - Uniswap V2 Price: {price_v2}")
-                logging.info(f"{config['name']} - Uniswap V3 ({fee_tier}) Price: {price_v3}")
+                if price_v2 is not None and price_v3 is not None:
+                    price_difference, direction = calculate_arbitrage(price_v2, price_v3)
 
-                if price_v2:
-                    if price_v3 > price_v2 * (1 + DETECTION_THRESHOLD):
-                        price_difference = (price_v3 / price_v2 - 1) * 100
-                        if price_v3 > price_v2 * (1 + EXECUTION_THRESHOLD):
-                            logging.info(f"Executing arbitrage: {config['name']} - Uniswap V2 to Uniswap V3 ({fee_tier})")
-                            execute_arbitrage(config, pool_info, is_v2_to_v3=True, flash_loan_amount=w3_exec.to_wei(3700, 'ether'))
+                    if price_difference >= EXECUTION_THRESHOLD:
+                        logging.info(f"Arbitrage opportunity detected for {config['name']}:")
+                        logging.info(f"V2 Price: {price_v2}")
+                        logging.info(f"V3 Price ({fee_tier}): {price_v3}")
+                        logging.info(f"Price difference: {price_difference:.2f}%")
+                        logging.info(f"Direction: {direction}")
 
-                    elif price_v2 > price_v3 * (1 + DETECTION_THRESHOLD):
-                        price_difference = (price_v2 / price_v3 - 1) * 100
-                        if price_v2 > price_v3 * (1 + EXECUTION_THRESHOLD):
-                            logging.info(f"Executing arbitrage: {config['name']} - Uniswap V3 ({fee_tier}) to Uniswap V2")
-                            execute_arbitrage(config, pool_info, is_v2_to_v3=False, flash_loan_amount=w3_exec.to_wei(3700, 'ether'))
+                        execute_arbitrage(config, pool_info, direction, price_difference)
 
-        time.sleep(0.1)  # Small delay to prevent overwhelming the system
-
-# Main execution block
+        time.sleep(10)  # Wait for 10 seconds before the next iteration
 if __name__ == "__main__":
-    main_logger.info("Starting multi-pair arbitrage bot with flashloaning...")
-    
-    try:
-        monitor_arbitrage_opportunities()
-    except KeyboardInterrupt:
-        main_logger.info("Arbitrage bot stopped by user.")
-    except Exception as e:
-        main_logger.error(f"An error occurred: {str(e)}")
+    logging.info("Starting arbitrage monitoring on Ganache fork...")
+    monitor_arbitrage_opportunities()

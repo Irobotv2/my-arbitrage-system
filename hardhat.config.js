@@ -99,6 +99,21 @@ module.exports = {
     ],
   },
   networks: {
+    ganache: {
+      url: "http://127.0.0.1:8549",
+      chainId: 1337,
+      forking: {
+        url: "http://localhost:8545",
+      },
+      accounts: {
+        mnemonic: "material snap escape fortune banana wage estate child van scan dial mask",
+      },
+    },
+    sepolia: {
+      url: "https://sepolia.infura.io/v3/0640f56f05a942d7a25cfeff50de344d", // Use your Infura project ID
+      chainId: 11155111,
+      accounts: [process.env.PRIVATE_KEY], // Use your environment variable for private key
+    },
     virtual_mainnet: {
       url: "https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c",
       chainId: 1,
