@@ -128,15 +128,18 @@ def execute_flashloan_and_bundle():
 
         # Build the transaction to call initiateFlashLoanAndBundle
         nonce = get_nonce()
-        gas_price = w3.eth.gas_price
+        base_fee = w3.eth.get_block('latest')['baseFeePerGas']
+        max_fee_per_gas = base_fee + Web3.to_wei(2, 'gwei')  # Setting max fee per gas a bit higher than base fee
+        max_priority_fee_per_gas = Web3.to_wei(2, 'gwei')  # Setting priority fee
 
         tx = flashloan_contract.functions.initiateFlashLoanAndBundle(
             tokens, amounts, targets, payloads
         ).build_transaction({
             'from': sender.address,
             'nonce': nonce,
+            'maxFeePerGas': max_fee_per_gas,
+            'maxPriorityFeePerGas': max_priority_fee_per_gas,
             'gas': 500000,
-            'gasPrice': gas_price,
             'chainId': 11155111  # Sepolia chain ID
         })
 

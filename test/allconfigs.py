@@ -10,6 +10,8 @@ from eth_account import Account
 from logging.handlers import RotatingFileHandler
 import os
 from decimal import Decimal
+import requests
+
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -19,19 +21,25 @@ provider_url_localhost = 'http://localhost:8545'
 w3_local = Web3(Web3.HTTPProvider(provider_url_localhost, request_kwargs={'timeout': 30}))
 
 # Setup Web3 connection for executing transactions (Tenderly RPC)
-provider_url_exec = 'https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c'
+provider_url_exec = 'http://localhost:8545'
 w3_exec = Web3(Web3.HTTPProvider(provider_url_exec))
 w3_exec.middleware_onion.inject(geth_poa_middleware, layer=0)
 
 # Define your wallet address and private key
-wallet_address = "0x19F5034FAB7e2CcA2Ad46EC28acF20cbd098D3fF"
-private_key = "6d0ad7f50dccb88715e3592f39ea5be4c715531223b2daeb2de621dc8f6c230f"  # Replace with your actual private key
+wallet_address = "0x6f2F4f0210AC805D817d4CD0b9A4D0c29d232E93"
+private_key = "6575ac283b8aa1cbd913d2d28557e318048f8e62a5a19a74001988e2f40ab06c"  # Replace with your actual private key
 
 # Define contract addresses
 UNISWAP_V2_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"
 FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS = "0x26B7B5AB244114ab88578D5C4cD5b096097bf543"
 
+# Define builder URLs
+builder_urls = [
+    "https://relay.flashbots.net",  # Flashbots Relay
+    "https://rpc.f1b.io",  # f1b.io
+    # ... Add other builders as needed
+]
 # ABIs
 V2_POOL_ABI = [
     {
@@ -150,12 +158,59 @@ ERC20_ABI = [
         "type": "function"
     }
 ]
+# Create loggers (add this after the setup_logger function)
+main_logger = logging.getLogger('main_logger')
+main_logger.setLevel(logging.INFO)
+submitted_logger = logging.getLogger('submitted_transactions')
+confirmed_logger = logging.getLogger('confirmed_transactions')
 
 # Create contract instances
 v2_router_contract = w3_exec.eth.contract(address=UNISWAP_V2_ROUTER_ADDRESS, abi=V2_ROUTER_ABI)
 v3_router_contract = w3_exec.eth.contract(address=UNISWAP_V3_ROUTER_ADDRESS, abi=V3_ROUTER_ABI)
 flashloan_contract = w3_exec.eth.contract(address=FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, abi=FLASHLOAN_BUNDLE_EXECUTOR_ABI)
 
+
+def setup_logger(name, log_file, level=logging.INFO):
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+    handler.setFormatter(formatter)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+
+    return logger
+
+main_logger = setup_logger('main_logger', 'arbitrage_bot.log')
+submitted_logger = setup_logger('submitted_transactions', 'submitted_transactions.log')
+confirmed_logger = setup_logger('confirmed_transactions', 'confirmed_transactions.log')
+
+def send_bundle_to_builders(bundle):
+    for url in builder_urls:
+        try:
+            main_logger.info(f"Sending bundle to {url} with payload: {json.dumps(bundle, indent=2)}")
+            response = requests.post(url, json=bundle, headers={"Content-Type": "application/json"})
+            if response.status_code == 200:
+                main_logger.info(f"Bundle sent successfully to {url}: {response.json()}")
+            else:
+                main_logger.warning(f"Failed to send bundle to {url}: {response.status_code} - {response.text}")
+        except Exception as e:
+            main_logger.error(f"Error sending bundle to {url}: {str(e)}")
+
+def send_bundle(transaction_bundle):
+    # Construct the bundle payload
+    bundle = {
+        "method": "eth_sendBundle",
+        "params": [transaction_bundle],
+        "id": 1,
+        "jsonrpc": "2.0"
+    }
+
+    # Log the crafted bundle payload
+    main_logger.info(f"Crafted bundle for submission: {json.dumps(bundle, indent=2)}")
+
+    # Send bundle to all builders
+    send_bundle_to_builders(bundle)
 # Connect to Redis
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
@@ -294,6 +349,9 @@ def decode_balancer_error(error_data):
         return error_message
     return "Unknown error"
 def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
+    """
+    Execute an arbitrage opportunity by crafting and submitting transactions as bundles to Flashbots.
+    """
     token0_address = config['token0']['address']
     token1_address = config['token1']['address']
     
@@ -313,7 +371,7 @@ def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
     
     main_logger.info(f"Calculated optimal flash loan amount: {optimal_amount_eth} WETH ({flash_loan_amount} wei)")
 
-    # Rest of the function remains the same...
+    # Log the details of the arbitrage execution
     main_logger.info(f"Executing arbitrage with flash loan amount: {flash_loan_amount} wei")
     main_logger.info(f"Token0: {token0_address}, Token1: {token1_address}")
     main_logger.info(f"Sorted tokens: {sorted_tokens}")
@@ -369,7 +427,8 @@ def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
 
     # Combine all payloads and targets
     all_payloads = approval_payloads + swap_payloads
-    all_targets = sorted_tokens + swap_targets
+    all_targets = list(sorted_tokens) + swap_targets
+
 
     tokens = list(sorted_tokens)
     amounts = [flash_loan_amount, flash_loan_amount]
@@ -415,6 +474,21 @@ def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
 
         main_logger.info(f"Flashloan transaction sent. Hash: {tx_hash.hex()}")
 
+        # Prepare the transaction bundle for Flashbots
+        transaction_bundle = {
+            "txs": [signed_tx.rawTransaction.hex()],
+            "blockNumber": w3_exec.eth.block_number + 1,
+            "minTimestamp": int(time.time()),
+            "maxTimestamp": int(time.time()) + 60,  # Bundle valid for the next 60 seconds
+            "revertingTxHashes": []
+        }
+
+        # Log the transaction bundle details
+        main_logger.info(f"Transaction bundle details: {json.dumps(transaction_bundle, indent=2)}")
+
+        # Send the crafted bundle to the builders
+        send_bundle(transaction_bundle)
+
         receipt = w3_exec.eth.wait_for_transaction_receipt(tx_hash)
         if receipt['status'] == 1:
             confirmed_logger.info(f"Arbitrage transaction confirmed - Hash: {tx_hash.hex()}, Pair: {config['name']}, Type: {'V2 to V3' if is_v2_to_v3 else 'V3 to V2'}, Amount: {flash_loan_amount}, Fee Tier: {v3_pool_info['fee']}, Gas Used: {receipt['gasUsed']}, Effective Gas Price: {receipt['effectiveGasPrice']}")
@@ -435,7 +509,6 @@ def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
                 # Here you can add specific handling for different Balancer error codes
                 if "BAL#528" in decoded_error:
                     main_logger.error("Encountered BAL#528 error. This might indicate an issue with the flash loan or token approvals.")
-                    # Add specific handling for BAL#528 error if needed
             else:
                 main_logger.error(f"Execution reverted: {decoded_error}")
         elif "SafeMath: subtraction overflow" in error_message:
