@@ -11,8 +11,8 @@ from logging.handlers import RotatingFileHandler
 import os
 from decimal import Decimal
 import requests
-
-
+from eth_account.messages import encode_defunct
+from eth_account import Account
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 
@@ -33,13 +33,31 @@ private_key = "6575ac283b8aa1cbd913d2d28557e318048f8e62a5a19a74001988e2f40ab06c"
 UNISWAP_V2_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"
 FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS = "0x26B7B5AB244114ab88578D5C4cD5b096097bf543"
+# Define minimum liquidity threshold in ETH (or equivalent value)
+MIN_LIQUIDITY_THRESHOLD_ETH = Decimal('10')  # Example: 10 ETH equivalent
 
 # Define builder URLs
 builder_urls = [
-    "https://relay.flashbots.net",  # Flashbots Relay
+    "https://rpc.flashbots.net",  # Flashbots
     "https://rpc.f1b.io",  # f1b.io
-    # ... Add other builders as needed
+    "https://rsync-builder.xyz",  # rsync
+    "https://mevshare-rpc.beaverbuild.org",  # beaverbuild.org
+    "https://builder0x69.io",  # builder0x69
+    "https://rpc.titanbuilder.xyz",  # Titan
+    "https://builder.eigenphi.io",  # EigenPhi
+    "https://boba-builder.com/searcher/bundle",  # boba-builder
+    "https://builder.gmbit.co/rpc",  # Gambit Labs
+    "https://rpc.payload.de",  # payload
+    "https://rpc.lokibuilder.xyz",  # Loki
+    "https://buildai.net",  # BuildAI
+    "https://rpc.mevshare.jetbldr.xyz",  # JetBuilder
+    "https://flashbots.rpc.tbuilder.xyz",  # tbuilder
+    "https://rpc.penguinbuild.org",  # penguinbuild
+    "https://rpc.bobthebuilder.xyz",  # bobthebuilder
+    "https://rpc.btcs.com",  # BTCS
+    "https://rpc-builder.blxrbdn.com"  # bloXroute
 ]
+
 # ABIs
 V2_POOL_ABI = [
     {
@@ -186,10 +204,29 @@ submitted_logger = setup_logger('submitted_transactions', 'submitted_transaction
 confirmed_logger = setup_logger('confirmed_transactions', 'confirmed_transactions.log')
 
 def send_bundle_to_builders(bundle):
+    # Serialize the bundle to JSON string for signing
+    bundle_json = json.dumps(bundle, separators=(',', ':'))  # Ensure minified JSON
+
+    # Create a message for signing
+    message = encode_defunct(text=bundle_json)
+
+    # Sign the message with the private key
+    signed_message = Account.sign_message(message, private_key=private_key)
+
+    # Construct the X-Flashbots-Signature header
+    flashbots_signature = f"{wallet_address}:{signed_message.signature.hex()}"
+
     for url in builder_urls:
         try:
+            # Include the X-Flashbots-Signature header
+            headers = {
+                "Content-Type": "application/json",
+                "X-Flashbots-Signature": flashbots_signature
+            }
+
             main_logger.info(f"Sending bundle to {url} with payload: {json.dumps(bundle, indent=2)}")
-            response = requests.post(url, json=bundle, headers={"Content-Type": "application/json"})
+            response = requests.post(url, json=bundle, headers=headers)
+
             if response.status_code == 200:
                 main_logger.info(f"Bundle sent successfully to {url}: {response.json()}")
             else:
@@ -216,16 +253,31 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
 # Global variables
 REPORT_INTERVAL = 2 * 60 * 60  # 2 hours in seconds
-DETECTION_THRESHOLD = 0.005  # 0.5% threshold for detecting opportunities
-EXECUTION_THRESHOLD = 0.01   # 1% threshold for executing arbitrage
+DETECTION_THRESHOLD = 0.01  # 0.5% threshold for detecting opportunities
+EXECUTION_THRESHOLD = 0.02   # 1% threshold for executing arbitrage
 opportunities = []
 
-def load_configurations_from_redis():
+def load_and_filter_configurations_from_redis():
+    """
+    Load pool configurations from Redis and filter out those with zero or insufficient liquidity.
+    """
     configs = {}
     for key in redis_client.keys('*_config'):
         config_json = redis_client.get(key)
         config = json.loads(config_json)
-        configs[key.decode('utf-8')] = config
+
+        # Check V2 pool
+        if config.get('v2_pool') and check_v2_pool_liquidity(config['v2_pool']):
+            configs[key.decode('utf-8')] = config
+
+        # Check V3 pools
+        else:
+            valid_v3_pools = {fee: pool for fee, pool in config.get('v3_pools', {}).items() if check_v3_pool_liquidity(pool['address']) > 0}
+            if valid_v3_pools:
+                config['v3_pools'] = valid_v3_pools
+                configs[key.decode('utf-8')] = config
+            else:
+                main_logger.warning(f"No valid pools found for {key.decode('utf-8')}. Skipping.")
     return configs
 
 def get_token_decimals(token_address):
@@ -275,6 +327,13 @@ def get_price_v2(pool_contract, token0_decimals, token1_decimals):
 
 def get_price_v3(pool_contract, token0_decimals, token1_decimals):
     try:
+        # Check if pool liquidity meets the minimum threshold
+        liquidity = pool_contract.functions.liquidity().call()
+        if Decimal(liquidity) / Decimal(10 ** 18) < MIN_LIQUIDITY_THRESHOLD_ETH:
+            logging.warning(f"V3 pool has insufficient liquidity: {liquidity}")
+            return None
+        
+        # If liquidity is sufficient, proceed with price calculation
         slot0_data = pool_contract.functions.slot0().call()
         sqrt_price_x96 = slot0_data[0]
         return sqrt_price_x96_to_price(sqrt_price_x96, token0_decimals, token1_decimals)
@@ -282,10 +341,14 @@ def get_price_v3(pool_contract, token0_decimals, token1_decimals):
         logging.error(f"Error getting V3 slot0 data: {str(e)}")
         return None
 
+
 def sort_tokens(token_a, token_b):
     return (token_a, token_b) if token_a.lower() < token_b.lower() else (token_b, token_a)
 
 def calculate_optimal_flashloan_amount(v3_pool_address, price_difference):
+    """
+    Calculate the optimal amount for a flash loan based on price difference and pool liquidity.
+    """
     try:
         v3_pool_contract = w3_local.eth.contract(address=v3_pool_address, abi=V3_POOL_ABI)
         liquidity = v3_pool_contract.functions.liquidity().call()
@@ -303,6 +366,7 @@ def calculate_optimal_flashloan_amount(v3_pool_address, price_difference):
     except Exception as e:
         main_logger.error(f"Error calculating optimal flashloan amount: {str(e)}")
         return 1  # Return 1 WETH as a fallback
+
 
 # Add this function near the top of your script, after the imports
 def setup_logger(name, log_file, level=logging.INFO):
@@ -357,19 +421,20 @@ def execute_arbitrage(config, v3_pool_info, is_v2_to_v3, price_difference):
     
     sorted_tokens = sort_tokens(token0_address, token1_address)
 
-    # Check liquidity
+    # Check liquidity for V3 pool
     v3_pool_contract = w3_local.eth.contract(address=v3_pool_info['address'], abi=V3_POOL_ABI)
     liquidity = v3_pool_contract.functions.liquidity().call()
     
-    if liquidity == 0:
-        main_logger.warning(f"Zero liquidity in pool {v3_pool_info['address']}. Skipping arbitrage execution.")
+    if Decimal(liquidity) / Decimal(10 ** 18) < MIN_LIQUIDITY_THRESHOLD_ETH:
+        main_logger.warning(f"V3 pool {v3_pool_info['address']} has insufficient liquidity. Skipping arbitrage execution.")
         return
 
     # Calculate optimal flash loan amount between 1 and 100 WETH
-    optimal_amount_eth = max(min(price_difference, 100), 1)
+    optimal_amount_eth = calculate_optimal_flashloan_amount(v3_pool_info['address'], price_difference)
     flash_loan_amount = w3_exec.to_wei(optimal_amount_eth, 'ether')
-    
-    main_logger.info(f"Calculated optimal flash loan amount: {optimal_amount_eth} WETH ({flash_loan_amount} wei)")
+
+    # Log the details of the arbitrage execution
+    main_logger.info(f"Calculated optimal flash loan amount: {optimal_amount_eth} WETH ({flash_loan_amount} wei), Gas price: {w3_exec.eth.gas_price}, Expected profit: {price_difference}%")
 
     # Log the details of the arbitrage execution
     main_logger.info(f"Executing arbitrage with flash loan amount: {flash_loan_amount} wei")
@@ -547,45 +612,31 @@ def calculate_percentage_difference(v1, v2):
     return abs(v1 - v2) / ((v1 + v2) / Decimal('2')) * Decimal('100')
 
 def calculate_profit_percentage(price_v2, price_v3, gas_cost, flash_loan_fee):
-    """
-    Calculate the profit percentage accounting for gas costs and flash loan fees.
-    """
-    # Convert to Decimal for precision
     price_v2 = Decimal(str(price_v2))
     price_v3 = Decimal(str(price_v3))
     gas_cost = Decimal(str(gas_cost))
     flash_loan_fee = Decimal(str(flash_loan_fee))
 
-    # Determine the direction of arbitrage
-    if price_v3 < price_v2:  # V3 to V2 arbitrage
+    if price_v3 < price_v2:  
         buy_price = price_v3
         sell_price = price_v2
-    else:  # V2 to V3 arbitrage
+    else:  
         buy_price = price_v2
         sell_price = price_v3
 
-    # Calculate the raw profit percentage
     raw_profit_percentage = (sell_price - buy_price) / buy_price * Decimal('100')
-
-    # Estimate the transaction value (conservative estimate)
     transaction_value = buy_price
-
-    # Convert gas cost to the same unit as prices
     gas_cost_in_eth = w3_exec.from_wei(gas_cost, 'ether')
-
-    # Calculate the flash loan fee amount
     flash_loan_fee_amount = transaction_value * flash_loan_fee
     total_fees = gas_cost_in_eth + flash_loan_fee_amount
-
-    # Calculate net profit
     net_profit = (raw_profit_percentage / Decimal('100') * transaction_value) - total_fees
-
-    # Calculate profit percentage
     profit_percentage = (net_profit / transaction_value) * Decimal('100')
+
+    logging.debug(f"Price V2: {price_v2}, Price V3: {price_v3}, Gas Cost: {gas_cost}, Flash Loan Fee: {flash_loan_fee}")
+    logging.debug(f"Raw Profit Percentage: {raw_profit_percentage}, Net Profit: {net_profit}, Profit Percentage: {profit_percentage}")
 
     return float(profit_percentage)
 
-# Constants for fees (adjust these based on current rates)
 
 GAS_PRICE = Decimal('20')  # Gwei
 GAS_LIMIT = Decimal('500000')  # Adjust based on your contract's gas usage
@@ -617,21 +668,51 @@ def format_arbitrage_opportunity(config, price_v2, price_v3, fee_tier, profit_pe
     
     return output
 
-def check_v2_pool_exists(pool_address):
+def check_v2_pool_liquidity(pool_address):
+    """
+    Check if a V2 pool exists, has non-zero reserves, and meets the minimum liquidity threshold.
+    """
     try:
         v2_pool_contract = w3_local.eth.contract(address=pool_address, abi=V2_POOL_ABI)
         reserves = v2_pool_contract.functions.getReserves().call()
-        logging.info(f"V2 Pool {pool_address} exists with reserves: {reserves}")
-        return True
+        reserve0 = Decimal(reserves[0]) / Decimal(10 ** 18)  # Convert to ETH equivalent
+        reserve1 = Decimal(reserves[1]) / Decimal(10 ** 18)  # Convert to ETH equivalent
+
+        if reserve0 >= MIN_LIQUIDITY_THRESHOLD_ETH and reserve1 >= MIN_LIQUIDITY_THRESHOLD_ETH:
+            logging.info(f"V2 Pool {pool_address} meets liquidity threshold with reserves: {reserves}")
+            return True
+        else:
+            logging.warning(f"V2 Pool {pool_address} does not meet liquidity threshold: reserve0={reserve0} ETH, reserve1={reserve1} ETH")
+            return False
     except Exception as e:
         logging.error(f"Error checking V2 pool {pool_address}: {str(e)}")
         return False
 
+
+
 def check_v3_pool_liquidity(pool_address):
-    v3_pool_contract = w3_local.eth.contract(address=pool_address, abi=V3_POOL_ABI)
-    liquidity = v3_pool_contract.functions.liquidity().call()
-    logging.info(f"V3 Pool {pool_address} liquidity: {liquidity}")
-    return liquidity
+    """
+    Check the liquidity of a V3 pool and ensure it meets the minimum threshold.
+    """
+    try:
+        v3_pool_contract = w3_local.eth.contract(address=pool_address, abi=V3_POOL_ABI)
+        liquidity = v3_pool_contract.functions.liquidity().call()
+        
+        # Convert liquidity to an equivalent value in ETH (or the base asset)
+        # Assuming that liquidity is already in a base unit like ETH
+        liquidity_eth = Decimal(liquidity) / Decimal(10 ** 18)  # Adjust based on token decimals
+
+        if liquidity_eth >= MIN_LIQUIDITY_THRESHOLD_ETH:
+            logging.info(f"V3 Pool {pool_address} meets liquidity threshold: {liquidity_eth} ETH")
+            return liquidity
+        else:
+            logging.warning(f"V3 Pool {pool_address} does not meet liquidity threshold: {liquidity_eth} ETH")
+            return 0
+    except Exception as e:
+        logging.error(f"Error checking V3 pool liquidity {pool_address}: {str(e)}")
+        return 0
+
+
 
 def validate_v3_price(price, fee_tier):
     if price is None:
@@ -642,19 +723,30 @@ def validate_v3_price(price, fee_tier):
         return None
     return price
 
-def is_valid_arbitrage_opportunity(price_v2, price_v3, profit_percentage):
+def is_valid_arbitrage_opportunity(price_v2, price_v3, profit_percentage, liquidity_v2, liquidity_v3):
     if price_v2 is None or price_v3 is None:
         return False
     if price_v2 <= 0 or price_v3 <= 0:
         return False
+    if profit_percentage <= 0:  # Exclude negative or zero profit percentages
+        logging.info(f"Profit percentage is not positive: {profit_percentage}%")
+        return False
     if abs(profit_percentage) > 10:  # Adjust this threshold as needed
         logging.warning(f"Unusually high profit percentage: {profit_percentage}%")
         return False
+    if liquidity_v2 < MIN_LIQUIDITY_THRESHOLD_ETH or liquidity_v3 < MIN_LIQUIDITY_THRESHOLD_ETH:
+        logging.warning(f"Liquidity below threshold: V2={liquidity_v2}, V3={liquidity_v3}")
+        return False
     return True
+
+
 def monitor_arbitrage_opportunities():
+    """
+    Main function to monitor and execute arbitrage opportunities.
+    """
     start_time = time.time()
     last_report_time = start_time
-    configurations = load_configurations_from_redis()
+    configurations = load_and_filter_configurations_from_redis()  # Use the filtered configurations
 
     while True:
         current_time = time.time()
@@ -665,13 +757,13 @@ def monitor_arbitrage_opportunities():
             token0_decimals = get_token_decimals(token0_address)
             token1_decimals = get_token_decimals(token1_address)
 
-            if config['v2_pool']:
+            if config.get('v2_pool'):
                 v2_pool_contract = w3_local.eth.contract(address=config['v2_pool'], abi=V2_POOL_ABI)
                 price_v2 = get_price_v2(v2_pool_contract, token0_decimals, token1_decimals)
             else:
                 price_v2 = None
 
-            for fee_tier, pool_info in config['v3_pools'].items():
+            for fee_tier, pool_info in config.get('v3_pools', {}).items():
                 v3_pool_contract = w3_local.eth.contract(address=pool_info['address'], abi=V3_POOL_ABI)
                 price_v3 = get_price_v3(v3_pool_contract, token0_decimals, token1_decimals)
 
@@ -679,7 +771,9 @@ def monitor_arbitrage_opportunities():
                     # Calculate profit percentage
                     profit_percentage = calculate_profit_percentage(price_v2, price_v3, GAS_COST, FLASH_LOAN_FEE)
 
-                    if abs(profit_percentage) > DETECTION_THRESHOLD:
+                    # Validate the opportunity with the new checks
+                    if abs(profit_percentage) > DETECTION_THRESHOLD and is_valid_arbitrage_opportunity(
+                        price_v2, price_v3, profit_percentage, liquidity_v2=10, liquidity_v3=10):  # replace with actual liquidity check
                         opportunity_info = format_arbitrage_opportunity(config, price_v2, price_v3, fee_tier, profit_percentage)
                         logging.info(opportunity_info)
 
@@ -696,6 +790,8 @@ def monitor_arbitrage_opportunities():
             opportunities.clear()  # Clear opportunities after reporting
 
         time.sleep(0.1)  # Small delay to prevent overwhelming the system
+
+
 
 # Make sure to call this function in your main execution block
 def generate_report(start_time, end_time):
