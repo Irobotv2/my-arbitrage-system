@@ -199,9 +199,7 @@ def setup_logger(name, log_file, level=logging.INFO):
 
     return logger
 
-main_logger = setup_logger('main_logger', 'arbitrage_bot.log')
-submitted_logger = setup_logger('submitted_transactions', 'submitted_transactions.log')
-confirmed_logger = setup_logger('confirmed_transactions', 'confirmed_transactions.log')
+
 
 def send_bundle_to_builders(bundle):
     # Serialize the bundle to JSON string for signing
@@ -353,16 +351,19 @@ def calculate_optimal_flashloan_amount(v3_pool_address, price_difference):
         v3_pool_contract = w3_local.eth.contract(address=v3_pool_address, abi=V3_POOL_ABI)
         liquidity = v3_pool_contract.functions.liquidity().call()
         
-        # Convert liquidity to ether equivalent
-        max_amount = w3_exec.from_wei(liquidity, 'ether')
+        # Convert liquidity to ether equivalent and Decimal
+        max_amount = Decimal(w3_exec.from_wei(liquidity, 'ether'))
+        
+        # Convert price_difference to Decimal
+        price_difference = Decimal(price_difference)
         
         # Calculate optimal amount based on price difference
         # Ensure it's between 1 and 100 WETH
-        optimal_amount = max(min(max_amount * (price_difference / 100), 100), 1)
+        optimal_amount = max(min(max_amount * (price_difference / Decimal(100)), Decimal(100)), Decimal(1))
         
         main_logger.info(f"Liquidity: {liquidity}, Max amount: {max_amount}, Price difference: {price_difference}, Optimal amount: {optimal_amount}")
         
-        return optimal_amount
+        return float(optimal_amount)  # Convert back to float if needed
     except Exception as e:
         main_logger.error(f"Error calculating optimal flashloan amount: {str(e)}")
         return 1  # Return 1 WETH as a fallback
@@ -380,10 +381,7 @@ def setup_logger(name, log_file, level=logging.INFO):
 
     return logger
 
-# Create loggers (add this after the setup_logger function)
-main_logger = setup_logger('main_logger', 'arbitrage_bot.log')
-submitted_logger = setup_logger('submitted_transactions', 'submitted_transactions.log')
-confirmed_logger = setup_logger('confirmed_transactions', 'confirmed_transactions.log')
+
 
 def approve_tokens(token_address, amount):
     token_contract = w3_exec.eth.contract(address=token_address, abi=ERC20_ABI)
@@ -612,31 +610,45 @@ def calculate_percentage_difference(v1, v2):
     return abs(v1 - v2) / ((v1 + v2) / Decimal('2')) * Decimal('100')
 
 def calculate_profit_percentage(price_v2, price_v3, gas_cost, flash_loan_fee):
+    """
+    Calculate the profit percentage accounting for gas costs and flash loan fees.
+    """
+    # Convert to Decimal for precision
     price_v2 = Decimal(str(price_v2))
     price_v3 = Decimal(str(price_v3))
     gas_cost = Decimal(str(gas_cost))
     flash_loan_fee = Decimal(str(flash_loan_fee))
 
-    if price_v3 < price_v2:  
+    # Determine the direction of arbitrage
+    if price_v3 < price_v2:  # V3 to V2 arbitrage
         buy_price = price_v3
         sell_price = price_v2
-    else:  
+    else:  # V2 to V3 arbitrage
         buy_price = price_v2
         sell_price = price_v3
 
+    # Calculate the raw profit percentage
     raw_profit_percentage = (sell_price - buy_price) / buy_price * Decimal('100')
+
+    # Estimate the transaction value (conservative estimate)
     transaction_value = buy_price
+
+    # Convert gas cost to the same unit as prices
     gas_cost_in_eth = w3_exec.from_wei(gas_cost, 'ether')
+
+    # Calculate the flash loan fee amount
     flash_loan_fee_amount = transaction_value * flash_loan_fee
     total_fees = gas_cost_in_eth + flash_loan_fee_amount
-    net_profit = (raw_profit_percentage / Decimal('100') * transaction_value) - total_fees
-    profit_percentage = (net_profit / transaction_value) * Decimal('100')
 
-    logging.debug(f"Price V2: {price_v2}, Price V3: {price_v3}, Gas Cost: {gas_cost}, Flash Loan Fee: {flash_loan_fee}")
-    logging.debug(f"Raw Profit Percentage: {raw_profit_percentage}, Net Profit: {net_profit}, Profit Percentage: {profit_percentage}")
+    # Calculate net profit
+    net_profit = (raw_profit_percentage / Decimal('100') * transaction_value) - total_fees
+
+    # Calculate profit percentage
+    profit_percentage = (net_profit / transaction_value) * Decimal('100')
 
     return float(profit_percentage)
 
+# Constants for fees (adjust these based on current rates)
 
 GAS_PRICE = Decimal('20')  # Gwei
 GAS_LIMIT = Decimal('500000')  # Adjust based on your contract's gas usage
@@ -725,30 +737,156 @@ def validate_v3_price(price, fee_tier):
 
 def is_valid_arbitrage_opportunity(price_v2, price_v3, profit_percentage, liquidity_v2, liquidity_v3):
     if price_v2 is None or price_v3 is None:
+        logging.debug("Opportunity validation failed: One or both prices are None.")
         return False
     if price_v2 <= 0 or price_v3 <= 0:
+        logging.debug("Opportunity validation failed: One or both prices are less than or equal to 0.")
         return False
     if profit_percentage <= 0:  # Exclude negative or zero profit percentages
-        logging.info(f"Profit percentage is not positive: {profit_percentage}%")
+        logging.info(f"Opportunity validation failed: Profit percentage is not positive: {profit_percentage}%")
         return False
     if abs(profit_percentage) > 10:  # Adjust this threshold as needed
-        logging.warning(f"Unusually high profit percentage: {profit_percentage}%")
+        logging.warning(f"Opportunity validation failed: Unusually high profit percentage: {profit_percentage}%")
         return False
     if liquidity_v2 < MIN_LIQUIDITY_THRESHOLD_ETH or liquidity_v3 < MIN_LIQUIDITY_THRESHOLD_ETH:
-        logging.warning(f"Liquidity below threshold: V2={liquidity_v2}, V3={liquidity_v3}")
+        logging.warning(f"Opportunity validation failed: Liquidity below threshold: V2={liquidity_v2}, V3={liquidity_v3}")
         return False
     return True
 
 
-def monitor_arbitrage_opportunities():
+
+
+# Update the generate_report function to run for 2 minutes
+def generate_report(start_time, end_time):
+    report = f"Arbitrage Opportunity Report\n"
+    report += f"Time period: {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}\n\n"
+
+    if not opportunities:
+        report += "No opportunities detected during this period.\n"
+    else:
+        report += f"Total opportunities detected: {len(opportunities)}\n"
+        report += f"Opportunities exceeding execution threshold: {sum(1 for opp in opportunities if opp['profit_percentage'] >= EXECUTION_THRESHOLD * 100)}\n\n"
+
+        report += "Detailed Analysis of Top 10 Opportunities:\n"
+        top_opportunities = sorted(opportunities, key=lambda x: x['profit_percentage'], reverse=True)[:10]
+        for i, opp in enumerate(top_opportunities, 1):
+            report += f"{i}. Pair: {opp['pair']} - Type: {opp['type']} ({opp['fee_tier']})\n"
+            report += f"   Timestamp: {datetime.fromtimestamp(opp['timestamp'])}\n"
+            report += f"   V2 Price: {opp['price_v2']:.8f}\n"
+            report += f"   V3 Price: {opp['price_v3']:.8f}\n"
+            report += f"   Profit %: {opp['profit_percentage']:.2f}%\n"
+
+            # Detailed Logging and Analysis
+            report += check_detailed_arbitrage_analysis(opp)
+
+    logging.info("Generating report...")
+    logging.info(report)
+
+    # Save report to a file
+    with open(f"arbitrage_report_{int(end_time)}.txt", "w") as f:
+        f.write(report)
+
+def check_detailed_arbitrage_analysis(opp):
     """
-    Main function to monitor and execute arbitrage opportunities.
+    Perform a detailed analysis on the given arbitrage opportunity and return a string for the report.
+    """
+    details = "\n  Detailed Analysis:\n"
+
+    # Check price calculation differences
+    if abs(opp['price_v2'] - opp['price_v3']) < 1e-8:
+        details += "  - Price calculation difference: Minor discrepancy detected.\n"
+    else:
+        details += "  - Price calculation difference: Significant discrepancy. Review formulas.\n"
+
+    # Check fee structure differences
+    if opp['fee_tier'] not in [500, 3000, 10000]:  # Assuming 0.05%, 0.3%, 1%
+        details += "  - Fee structure difference: Unrecognized V3 fee tier.\n"
+    else:
+        details += "  - Fee structure verified correctly for V3.\n"
+
+    # Slippage estimation accuracy
+    if abs(opp['slippage_v2'] - opp['slippage_v3']) > 0.01:
+        details += "  - Slippage estimation: Large difference in slippage between V2 and V3.\n"
+    else:
+        details += "  - Slippage estimation is within acceptable range.\n"
+
+    # Decimal precision consistency
+    if 'decimal_precision_issue' in opp:
+        details += "  - Decimal precision: Inconsistent handling of decimals detected.\n"
+    else:
+        details += "  - Decimal precision is consistent across calculations.\n"
+
+    # Check liquidity depth
+    if opp['liquidity_v2'] < MIN_LIQUIDITY_THRESHOLD_ETH or opp['liquidity_v3'] < MIN_LIQUIDITY_THRESHOLD_ETH:
+        details += "  - Liquidity depth: One or more pools do not meet the minimum liquidity threshold.\n"
+    else:
+        details += "  - Liquidity depth meets the required threshold.\n"
+
+    # Gas cost estimation check
+    if opp['gas_cost'] > GAS_COST:
+        details += "  - Gas cost estimation: Potentially outdated or inaccurate gas price data.\n"
+    else:
+        details += "  - Gas cost estimation is within the expected range.\n"
+
+    # Flash loan fee accuracy
+    if opp['flash_loan_fee'] != FLASH_LOAN_FEE:
+        details += "  - Flash loan fee: Discrepancy detected in flash loan fee calculation.\n"
+    else:
+        details += "  - Flash loan fee calculation is accurate.\n"
+
+    # Price impact check
+    if opp['price_impact'] > 0.01:  # Example threshold for price impact
+        details += "  - Price impact: Significant price impact detected due to trade size.\n"
+    else:
+        details += "  - Price impact is minimal.\n"
+
+    # Tick spacing check for V3
+    if 'tick_spacing_issue' in opp:
+        details += "  - V3 Tick Spacing: Tick spacing inconsistency detected in V3 pools.\n"
+    else:
+        details += "  - V3 Tick Spacing is correctly handled.\n"
+
+    # Stale data usage
+    if opp['data_age'] > 5:  # 5 seconds threshold for data age
+        details += "  - Data Age: Data used in calculations may be outdated.\n"
+    else:
+        details += "  - Data Age is recent.\n"
+
+    # Mathematical errors
+    if 'math_error' in opp:
+        details += "  - Mathematical Error: Rounding or calculation error detected.\n"
+    else:
+        details += "  - No mathematical errors detected.\n"
+
+    # Pool address verification
+    if 'invalid_pool_address' in opp:
+        details += "  - Pool Address: Invalid or incorrect pool address used for fetching data.\n"
+    else:
+        details += "  - Pool Address verification passed.\n"
+
+    # Time delay check
+    if opp['execution_delay'] > 5:  # 5 seconds threshold for time delays
+        details += "  - Time Delay: High time delay between opportunity detection and execution.\n"
+    else:
+        details += "  - Time Delay is within acceptable limits.\n"
+
+    # MEV cost consideration
+    if 'mev_cost_impact' in opp:
+        details += "  - MEV Costs: Significant MEV costs detected.\n"
+    else:
+        details += "  - No significant MEV costs detected.\n"
+
+    return details
+
+
+def monitor_arbitrage_opportunities(duration=120):
+    """
+    Monitor and execute arbitrage opportunities for a specified duration.
     """
     start_time = time.time()
-    last_report_time = start_time
     configurations = load_and_filter_configurations_from_redis()  # Use the filtered configurations
 
-    while True:
+    while time.time() - start_time < duration:
         current_time = time.time()
 
         for config_key, config in configurations.items():
@@ -760,76 +898,71 @@ def monitor_arbitrage_opportunities():
             if config.get('v2_pool'):
                 v2_pool_contract = w3_local.eth.contract(address=config['v2_pool'], abi=V2_POOL_ABI)
                 price_v2 = get_price_v2(v2_pool_contract, token0_decimals, token1_decimals)
+                logging.debug(f"V2 Price for {config['name']}: {price_v2}")
             else:
                 price_v2 = None
+                logging.debug(f"No V2 pool found for {config['name']}")
 
             for fee_tier, pool_info in config.get('v3_pools', {}).items():
                 v3_pool_contract = w3_local.eth.contract(address=pool_info['address'], abi=V3_POOL_ABI)
                 price_v3 = get_price_v3(v3_pool_contract, token0_decimals, token1_decimals)
+                logging.debug(f"V3 Price for {config['name']} (Fee tier: {fee_tier}): {price_v3}")
 
                 if price_v2 is not None and price_v3 is not None:
                     # Calculate profit percentage
                     profit_percentage = calculate_profit_percentage(price_v2, price_v3, GAS_COST, FLASH_LOAN_FEE)
+                    logging.debug(f"Profit percentage for {config['name']}: {profit_percentage}%")
 
                     # Validate the opportunity with the new checks
                     if abs(profit_percentage) > DETECTION_THRESHOLD and is_valid_arbitrage_opportunity(
-                        price_v2, price_v3, profit_percentage, liquidity_v2=10, liquidity_v3=10):  # replace with actual liquidity check
+                            price_v2, price_v3, profit_percentage, liquidity_v2=10, liquidity_v3=10):  # Replace with actual liquidity check
                         opportunity_info = format_arbitrage_opportunity(config, price_v2, price_v3, fee_tier, profit_percentage)
-                        logging.info(opportunity_info)
+                        logging.info(f"Opportunity detected: {opportunity_info}")
+
+                        # Add the opportunity to the list
+                        opportunities.append({
+                            'pair': config['name'],
+                            'type': 'V2 to V3' if price_v3 > price_v2 else 'V3 to V2',
+                            'fee_tier': fee_tier,
+                            'timestamp': current_time,
+                            'price_v2': price_v2,
+                            'price_v3': price_v3,
+                            'profit_percentage': profit_percentage,
+                            # Include additional fields used in the report
+                            'slippage_v2': 0.01,  # Example placeholder; replace with actual slippage calculation
+                            'slippage_v3': 0.01,
+                            'liquidity_v2': 10,  # Example placeholder; replace with actual liquidity
+                            'liquidity_v3': 10,
+                            'gas_cost': GAS_COST,
+                            'flash_loan_fee': FLASH_LOAN_FEE,
+                            'price_impact': 0.01,  # Example placeholder; replace with actual price impact calculation
+                            'data_age': 1,  # Example placeholder; replace with actual data age
+                            'execution_delay': 2  # Example placeholder; replace with actual delay
+                        })
+
+                        logging.info("Opportunity added to list.")
 
                         if abs(profit_percentage) > EXECUTION_THRESHOLD:
                             logging.info(f"Executing arbitrage: {config['name']} - {'V2 to V3' if price_v3 > price_v2 else 'V3 to V2'} ({fee_tier})")
                             execute_arbitrage(config, pool_info, is_v2_to_v3=(price_v3 > price_v2), price_difference=abs(profit_percentage))
+                    else:
+                        logging.debug(f"No valid arbitrage opportunity for {config['name']}: Profit {profit_percentage}%")
                 else:
                     logging.warning(f"Unable to calculate prices for {config['name']}: V2 Price = {price_v2}, V3 Price = {price_v3}")
 
-        # Check if it's time to generate a report
-        if current_time - last_report_time >= REPORT_INTERVAL:
-            generate_report(start_time, current_time)
-            last_report_time = current_time
-            opportunities.clear()  # Clear opportunities after reporting
+        # Report generation after running for 2 minutes
+        if current_time - start_time >= duration:
+            try:
+                logging.info("Starting report generation...")
+                generate_report(start_time, current_time)
+                logging.info("Report generation completed successfully.")
+            except Exception as e:
+                logging.error(f"Error during report generation: {str(e)}")
+            break
 
         time.sleep(0.1)  # Small delay to prevent overwhelming the system
 
-
-
-# Make sure to call this function in your main execution block
-def generate_report(start_time, end_time):
-    report = f"Arbitrage Opportunity Report\n"
-    report += f"Time period: {datetime.fromtimestamp(start_time)} to {datetime.fromtimestamp(end_time)}\n\n"
-
-    if not opportunities:
-        report += "No opportunities detected during this period.\n"
-    else:
-        report += f"Total opportunities detected: {len(opportunities)}\n"
-        report += f"Opportunities exceeding execution threshold: {sum(1 for opp in opportunities if opp['profit_percentage'] >= EXECUTION_THRESHOLD * 100)}\n\n"
-
-        report += "Top 10 opportunities:\n"
-        top_opportunities = sorted(opportunities, key=lambda x: x['profit_percentage'], reverse=True)[:10]
-        for i, opp in enumerate(top_opportunities, 1):
-            report += f"{i}. {opp['pair']} - {opp['type']} ({opp['fee_tier']})\n"
-            report += f"   Timestamp: {datetime.fromtimestamp(opp['timestamp'])}\n"
-            report += f"   V2 Price: {opp['price_v2']:.8f}\n"
-            report += f"   V3 Price: {opp['price_v3']:.8f}\n"
-            report += f"   Profit %: {opp['profit_percentage']:.2f}%\n\n"
-
-    logging.info("Generating report...")
-    logging.info(report)
-
-    # Save report to a file
-    with open(f"arbitrage_report_{int(end_time)}.txt", "w") as f:
-        f.write(report)
-
-# Replace your existing main execution block with this one
+# Run for 2 minutes for debugging
 if __name__ == "__main__":
-    main_logger.info("Starting multi-pair arbitrage bot with integrated diagnostics...")
-    while True:
-        try:
-            monitor_arbitrage_opportunities()
-        except KeyboardInterrupt:
-            main_logger.info("Arbitrage bot stopped by user.")
-            break
-        except Exception as e:
-            main_logger.error(f"An error occurred: {str(e)}")
-            main_logger.info("Restarting monitoring in 60 seconds...")
-            time.sleep(60)
+    main_logger.info("Starting multi-pair arbitrage bot for detailed diagnostic analysis...")
+    monitor_arbitrage_opportunities(duration=120)

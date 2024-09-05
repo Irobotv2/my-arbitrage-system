@@ -1,0 +1,107 @@
+0x3de27EFa2F1AA663Ae5D458857e731c129069F29
+wstETH
+wstETH
+
+Wrapped liquid staked Ether 2.0
+
+10.43k
+$30.12m
+
+19.62%
+20%
+
+AAVE
+AAVE
+
+Aave Token
+
+
+
+
+
+
+
+0xDACf5Fa19b1f720111609043ac67A9818262850c
+Total liquidity
+$49,358,503
+WETH
+WETH
+
+Wrapped Ether
+
+13.23k
+$32.40m
+
+65.86%
+osETH
+osETH
+
+Staked ETH
+
+6.67k
+$16.82m
+
+34.14%
+
+
+
+0x5c6Ee304399DBdB9C8Ef030aB642B10820DB8F56
+BAL
+BAL
+
+Balancer
+
+19.63m
+$36.71m
+
+80.05%
+80%
+
+WETH
+WETH
+
+Wrapped Ether
+
+3.74k
+$9.17m
+
+19.95%
+20
+
+0x1E19CF2D73a72Ef1332C882F20534B6519Be0276
+rETH
+rETH
+
+Rocket Pool ETH
+
+5.69k
+$15.63m
+
+42.74%
+WETH
+WETH
+
+Wrapped Ether
+
+8.54k
+$20.93m
+
+0x2191Df821C198600499aA1f0031b1a7514D7A7D9
+sDAI
+sDAI
+
+Savings Dai
+
+2.67m
+$2.96m
+
+14.68%
+GYD
+GYD
+
+Gyro Dollar
+
+17.19m
+$17.19m
+
+85.3
