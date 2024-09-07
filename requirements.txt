@@ -1251,3 +1251,81 @@ By following these steps, you'll have a clear pathway towards successfully submi
 
 
 b9ecd3f2-6ea8-47ab-88be-74f78bcb48eb api key for ENSO
+
+
+
+
+I think my biggest problem with this method is as follows. When we are doing arbitrage detection what we are doing is comparing the samepair of liquidity pools and coparing their prices 
+
+Right so if for round number we are monitoring 
+
+WETH/USDC on uniswapv2 
+
+WETH/USDC on uniswapv3
+
+we find that uniswapv2 is 100$ cheaper for the same pair
+
+We need to input WETH on the uv2 pool and ouput USDC
+
+Take that outputted USDC and go from USDC to weth on the uniswapv3 pool.
+
+If we are doing path generation shouldnt we be saving the graph basically the intersection between the 2 pools as the commonality
+
+Basically if I want to arbitrage triangularly and more than triangle
+
+I would have to look at this.
+
+config:
+
+USDC/WETH
+
+WETH/DAI
+
+DAI/WBTC
+
+To generate the path we need to make sure the input and outputs are generated correctly
+
+Basically depending on the pool 
+
+USDC and WETH have to be together in the sequence
+
+In this example of config we cant go from 
+
+USDC to DAI because we dont have a 
+
+DAI to USDC pair in our config.
+
+Does this make sense?
+
+I need that path finder to take into account 
+
+config:
+
+USDC/WETH
+
+WETH/DAI
+
+DAI/WBTC
+
+In this example we can go from
+
+if this is a graph
+
+Graph A:
+
+1/2
+
+Graph B:
+
+2/3
+
+Graph C:
+
+3/4
+
+WE can input 1 and output 2 
+
+we can take that output and only go into B and get 3
+
+Whereas if we start with 3 we can get 2 from B or 4 from C
+

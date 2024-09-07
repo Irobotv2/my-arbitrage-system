@@ -3,6 +3,7 @@ from web3 import Web3
 import json
 import logging
 import time
+import os
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -10,9 +11,9 @@ logging.basicConfig(level=logging.INFO)
 # Connect to Web3 providers
 w3 = Web3(Web3.HTTPProvider('https://mainnet.infura.io/v3/0640f56f05a942d7a25cfeff50de344d'))
 
-# Uniswap V3 Factory and Quoter contract addresses and ABI snippets
+# Uniswap V3 Factory and V2 Factory addresses and ABI snippets
 UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
-UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'  # Updated V2 factory address
+UNISWAP_V2_FACTORY_ADDRESS = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
 
 # ABIs
 UNISWAP_V3_FACTORY_ABI = [
@@ -59,8 +60,11 @@ ERC20_ABI = [
 v3_factory_contract = w3.eth.contract(address=UNISWAP_V3_FACTORY_ADDRESS, abi=UNISWAP_V3_FACTORY_ABI)
 v2_factory_contract = w3.eth.contract(address=UNISWAP_V2_FACTORY_ADDRESS, abi=UNISWAP_V2_FACTORY_ABI)
 
-# Connect to Redis
-redis_client = redis.Redis(host='localhost', port=6379, db=0)
+# Connect to Redis using environment variables
+redis_host = os.getenv('REDIS_HOST', 'localhost')
+redis_port = os.getenv('REDIS_PORT', 6379)
+redis_db = os.getenv('REDIS_DB', 0)
+redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
 
 # Updated list of token IDs
 TOKEN_IDS = [
@@ -81,7 +85,7 @@ TOKEN_IDS = [
 ]
 
 # Fee tiers for Uniswap V3
-FEE_TIERS = [100, 500, 3000, 10000]
+FEE_TIERS = [3000]
 
 def generate_v3_pools(token_a, token_b):
     pools = {}
@@ -91,7 +95,7 @@ def generate_v3_pools(token_a, token_b):
             if pool_address != '0x0000000000000000000000000000000000000000':
                 pools[f'{fee / 10000:.2%}'] = {'address': pool_address, 'fee': fee}
         except Exception as e:
-            logging.error(f"Error fetching V3 pool for {token_a} - {token_b} with fee {fee}: {str(e)}")
+            logging.exception(f"Error fetching V3 pool for {token_a} - {token_b} with fee {fee}: {str(e)}")
     return pools
 
 def generate_v2_pool(token_a, token_b):
@@ -100,7 +104,7 @@ def generate_v2_pool(token_a, token_b):
         if pair_address != '0x0000000000000000000000000000000000000000':
             return pair_address
     except Exception as e:
-        logging.error(f"Error fetching V2 pool for {token_a} - {token_b}: {str(e)}")
+        logging.exception(f"Error fetching V2 pool for {token_a} - {token_b}: {str(e)}")
     return None
 
 def fetch_token_symbol(token_address):
@@ -108,7 +112,7 @@ def fetch_token_symbol(token_address):
         token_contract = w3.eth.contract(address=token_address, abi=ERC20_ABI)
         return token_contract.functions.symbol().call()
     except Exception as e:
-        logging.error(f"Error fetching symbol for token {token_address}: {str(e)}")
+        logging.exception(f"Error fetching symbol for token {token_address}: {str(e)}")
         return token_address[:6]  # Use first 6 characters as fallback
 
 def create_and_store_configs():

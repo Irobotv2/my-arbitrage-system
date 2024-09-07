@@ -1,20 +1,13 @@
-import asyncio
-import json
-import websockets
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 import redis
-import concurrent.futures
-import logging
+import json
 import pandas as pd
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import numpy as np
 
 # Configuration
-HTTP_URL = "http://localhost:8545"  # Change this back to HTTP instead of WebSocket
-web3 = Web3(Web3.HTTPProvider(HTTP_URL))
+TENDERLY_URL = "http://localhost:8545"
+web3 = Web3(Web3.HTTPProvider(TENDERLY_URL))
 web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
 # Connect to Redis
@@ -23,6 +16,7 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0)
 # Uniswap V3 Factory and Quoter contract addresses (mainnet)
 factory_address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 quoter_address = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+
 
 # ABIs
 factory_abi = [
@@ -89,70 +83,51 @@ liquidity_abi = [
 factory_contract = web3.eth.contract(address=factory_address, abi=factory_abi)
 quoter_contract = web3.eth.contract(address=quoter_address, abi=quoter_abi)
 
-def get_pool_data(token0, token1, fee):
+def get_pool_address(tokenA, tokenB, fee):
     try:
-        pool_address = factory_contract.functions.getPool(token0, token1, fee).call()
-        if pool_address == '0x0000000000000000000000000000000000000000':
-            return None
-        
+        pool_address = factory_contract.functions.getPool(tokenA, tokenB, fee).call()
+        return pool_address if pool_address != '0x0000000000000000000000000000000000000000' else None
+    except Exception as e:
+        print(f"Error getting pool address: {e}")
+        return None
+
+def get_pool_liquidity(pool_address):
+    try:
         pool_contract = web3.eth.contract(address=pool_address, abi=liquidity_abi)
         liquidity = pool_contract.functions.liquidity().call()
-        
-        return {
-            'address': pool_address,
-            'liquidity': liquidity
-        }
+        return liquidity
     except Exception as e:
-        logger.error(f"Error getting pool data: {e}")
+        print(f"Error getting pool liquidity: {e}")
         return None
 
-def get_quote(token_in, token_out, amount_in, fee):
+def get_quote(tokenIn, tokenOut, amountIn, fee):
     try:
-        quote = quoter_contract.functions.quoteExactInputSingle(
-            token_in,
-            token_out,
+        amount_out = quoter_contract.functions.quoteExactInputSingle(
+            tokenIn,
+            tokenOut,
             fee,
-            amount_in,
+            amountIn,
             0  # No price limit
         ).call()
-        return quote
+        return amount_out
     except Exception as e:
-        logger.error(f"Error getting quote for {token_in}-{token_out} with fee {fee}: {e}")
+        print(f"Error getting quote: {e}")
         return None
 
-def update_pool_data():
-    configurations = fetch_all_configurations()
-    results = []
-    for config_name, config in configurations.items():
-        token0 = web3.to_checksum_address(config['token0']['address'])
-        token1 = web3.to_checksum_address(config['token1']['address'])
-        amount_in = web3.to_wei(1, 'ether')  # 1 ETH worth
-
-        for fee in [100, 500, 3000, 10000]:  # 0.01%, 0.05%, 0.3%, 1% fee tiers
-            pool_data = get_pool_data(token0, token1, fee)
-            if pool_data:
-                quote = get_quote(token0, token1, amount_in, fee)
-                if quote:
-                    redis_key = f"{config_name}:{fee}"
-                    redis_client.hset(redis_key, mapping={
-                        'pool_address': pool_data['address'],
-                        'liquidity': pool_data['liquidity'],
-                        'quote': quote
-                    })
-                    logger.info(f"Updated data for {config_name} with fee {fee}")
-                    results.append({
-                        "Pair": f"{config['token0']['symbol']}-{config['token1']['symbol']}",
-                        "Fee Tier": f"{fee/10000}%",
-                        "Pool Address": pool_data['address'],
-                        "Liquidity": pool_data['liquidity'],
-                        "Input Amount": f"1 ETH worth of {config['token0']['symbol']}",
-                        f"{config['token1']['symbol']} Received": quote / 1e18,
-                    })
-    
-    # Create a DataFrame and save to CSV
-    df = pd.DataFrame(results)
-    df.to_csv('comprehensive_uniswap_v3_quotes.csv', index=False)
-    logger.info("Results saved to comprehensive_uniswap_v3_quotes.csv")
+def get_quotes_for_all_tiers(tokenA, tokenB, amountIn):
+    fee_tiers = [100, 500, 3000, 10000]  # 0.01%, 0.05%, 0.3%, 1% fee tiers
+    quotes = {}
+    for fee in fee_tiers:
+        pool_address = get_pool_address(tokenA, tokenB, fee)
+        if pool_address:
+            liquidity = get_pool_liquidity(pool_address)
+            quote = get_quote(tokenA, tokenB, amountIn, fee)
+            quotes[fee] = {
+                'pool_address': pool_address,
+                'liquidity': liquidity,
+                'quote': quote
+            }
+    return quotes
 
 def fetch_all_configurations():
     configs = {}
@@ -162,10 +137,45 @@ def fetch_all_configurations():
         configs[key.decode('utf-8')] = config
     return configs
 
-def main():
-    logger.info("Starting arbitrage system")
-    update_pool_data()
-    logger.info("Finished updating pool data")
+def test_liquidity_for_all_pairs():
+    configurations = fetch_all_configurations()
+    results = []
+
+    for config_name, config in configurations.items():
+        token0 = web3.to_checksum_address(config['token0']['address'])
+        token1 = web3.to_checksum_address(config['token1']['address'])
+        
+        # Test with 1 ETH worth of token0
+        amount_in = web3.to_wei(1, 'ether')
+        
+        quotes = get_quotes_for_all_tiers(token0, token1, amount_in)
+        if quotes:
+            token0_symbol = config['token0']['symbol']
+            token1_symbol = config['token1']['symbol']
+            
+            print(f"\nQuotes for {token0_symbol}-{token1_symbol}:")
+            for fee, data in quotes.items():
+                if data['quote']:
+                    print(f"Fee tier {fee/10000}%:")
+                    print(f"  Pool address: {data['pool_address']}")
+                    print(f"  Liquidity: {data['liquidity']}")
+                    print(f"  1 ETH worth of {token0_symbol} can be exchanged for {data['quote'] / 1e18:.6f} {token1_symbol}")
+                    
+                    results.append({
+                        "Pair": f"{token0_symbol}-{token1_symbol}",
+                        "Fee Tier": f"{fee/10000}%",
+                        "Pool Address": data['pool_address'],
+                        "Liquidity": data['liquidity'],
+                        "Input Amount": f"1 ETH worth of {token0_symbol}",
+                        f"{token1_symbol} Received": data['quote'] / 1e18,  # Assuming 18 decimals, adjust if needed
+                    })
+        else:
+            print(f"Failed to get quotes for {config_name}")
+
+    # Create a DataFrame and save to CSV
+    df = pd.DataFrame(results)
+    df.to_csv('comprehensive_uniswap_v3_quotes.csv', index=False)
+    print("\nResults saved to comprehensive_uniswap_v3_quotes.csv")
 
 if __name__ == "__main__":
-    main()
+    test_liquidity_for_all_pairs()

@@ -1,63 +1,99 @@
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
+import redis
+import json
 
 # Configuration
 TENDERLY_URL = "https://virtual.mainnet.rpc.tenderly.co/c4e60e60-6398-4e23-9ffc-f48f66d9706e"
 web3 = Web3(Web3.HTTPProvider(TENDERLY_URL))
 web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-# Uniswap V2 Router address
-uniswap_v2_router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+# Connect to Redis
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
-# Token addresses
-usdc_address = web3.to_checksum_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606EB48")
-weth_address = web3.to_checksum_address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+# Uniswap V2 Factory address
+uniswap_v2_factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 
-# Uniswap V2 Router ABI (only the function we need)
-router_abi = [
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-            {"internalType": "address[]", "name": "path", "type": "address[]"}
-        ],
-        "name": "getAmountsOut",
-        "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
+# FlashBotsUniswapQuery contract address (you need to deploy this contract first)
+flashbots_query_address = "YOUR_DEPLOYED_FLASHBOTS_QUERY_CONTRACT_ADDRESS"
+
+# ABIs
+factory_abi = [
+    {"inputs":[],"name":"allPairsLength","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+    {"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"allPairs","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}
 ]
 
-# Create contract object
-router_contract = web3.eth.contract(address=uniswap_v2_router, abi=router_abi)
+flashbots_query_abi = [
+    {"inputs":[{"internalType":"contract UniswapV2Factory","name":"uniswapFactory","type":"address"},{"internalType":"uint256","name":"start","type":"uint256"},{"internalType":"uint256","name":"stop","type":"uint256"}],"name":"getPairsByIndexRange","outputs":[{"internalType":"address[3][]","name":"","type":"address[3][]"}],"stateMutability":"view","type":"function"},
+    {"inputs":[{"internalType":"contract IUniswapV2Pair[]","name":"_pairs","type":"address[]"}],"name":"getReservesByPairs","outputs":[{"internalType":"uint256[3][]","name":"","type":"uint256[3][]"}],"stateMutability":"view","type":"function"}
+]
 
-def get_weth_price_in_usd_v2():
-    weth_amount = web3.to_wei(1, 'ether')  # 1 WETH
-    try:
-        amounts_out = router_contract.functions.getAmountsOut(
-            weth_amount,
-            [weth_address, usdc_address]
-        ).call()
-        return amounts_out[1] / 1e6  # Convert from USDC's 6 decimals to USD
-    except Exception as e:
-        print(f"Error getting WETH price: {e}")
-        return None
+# Create contract objects
+factory_contract = web3.eth.contract(address=uniswap_v2_factory, abi=factory_abi)
+flashbots_query_contract = web3.eth.contract(address=flashbots_query_address, abi=flashbots_query_abi)
 
-def calculate_weth_to_usdc_v2(usd_amount):
-    weth_price = get_weth_price_in_usd_v2()
-    if weth_price:
-        weth_amount = (usd_amount / weth_price) * 1e18  # Convert to WETH's 18 decimals
-        try:
-            amounts_out = router_contract.functions.getAmountsOut(
-                int(weth_amount),
-                [weth_address, usdc_address]
-            ).call()
-            usdc_out = amounts_out[1] / 1e6  # Convert from USDC's 6 decimals
-            print(f"${usd_amount} worth of WETH ({weth_amount / 1e18:.6f} WETH) can be exchanged for {usdc_out:.2f} USDC on Uniswap V2")
+def fetch_all_configurations():
+    configs = {}
+    for key in redis_client.keys('*_config'):
+        config_json = redis_client.get(key)
+        config = json.loads(config_json)
+        configs[key.decode('utf-8')] = config
+    return configs
+
+def get_all_pairs():
+    pairs_length = factory_contract.functions.allPairsLength().call()
+    batch_size = 1000  # Adjust based on your needs
+    all_pairs = []
+
+    for start in range(0, pairs_length, batch_size):
+        stop = min(start + batch_size, pairs_length)
+        pairs_batch = flashbots_query_contract.functions.getPairsByIndexRange(uniswap_v2_factory, start, stop).call()
+        all_pairs.extend(pairs_batch)
+
+    return all_pairs
+
+def get_reserves(pairs):
+    reserves = flashbots_query_contract.functions.getReservesByPairs(pairs).call()
+    return reserves
+
+def calculate_price(reserve0, reserve1, decimals0, decimals1):
+    if reserve0 == 0 or reserve1 == 0:
+        return 0
+    return (reserve1 / 10**decimals1) / (reserve0 / 10**decimals0)
+
+def main():
+    configurations = fetch_all_configurations()
+    all_pairs = get_all_pairs()
+
+    for config_name, config in configurations.items():
+        token0 = web3.to_checksum_address(config['token0']['address'])
+        token1 = web3.to_checksum_address(config['token1']['address'])
+        decimals0 = int(config['token0'].get('decimals', 18))
+        decimals1 = int(config['token1'].get('decimals', 18))
+
+        pair_address = None
+        for pair in all_pairs:
+            if (pair[0] == token0 and pair[1] == token1) or (pair[0] == token1 and pair[1] == token0):
+                pair_address = pair[2]
+                break
+
+        if pair_address:
+            reserves = get_reserves([pair_address])[0]
+            reserve0, reserve1, _ = reserves
+
+            if pair[0] == token1:  # Swap reserves if tokens are in reverse order
+                reserve0, reserve1 = reserve1, reserve0
+
+            price = calculate_price(reserve0, reserve1, decimals0, decimals1)
+
+            print(f"\nQuote for {config_name} on Uniswap V2:")
+            print(f"Pair address: {pair_address}")
+            print(f"Reserve {config['token0']['symbol']}: {reserve0 / 10**decimals0:.6f}")
+            print(f"Reserve {config['token1']['symbol']}: {reserve1 / 10**decimals1:.6f}")
+            print(f"Price: 1 {config['token0']['symbol']} = {price:.6f} {config['token1']['symbol']}")
             print(f"Uniswap V2 fee: 0.3%")
-        except Exception as e:
-            print(f"Error getting quote for WETH to USDC: {e}")
-    else:
-        print("Failed to calculate due to missing WETH price")
+        else:
+            print(f"\nNo Uniswap V2 pair found for {config_name}")
 
-# Run the calculation
-calculate_weth_to_usdc_v2(1000)
+if __name__ == "__main__":
+    main()

@@ -1,7 +1,11 @@
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractLogicError, BadFunctionCallOutput
+import logging
 import time
+from decimal import Decimal
+import json
+import redis  # Import Redis library
 
 # Initialize Web3
 provider_url = 'https://virtual.mainnet.rpc.tenderly.co/300a688c-e670-4eaa-a8d0-e55dc49b649c'
@@ -13,10 +17,22 @@ if not w3.is_connected():
     print("Failed to connect to Ethereum node. Please check your connection and try again.")
     exit()
 
+# Setup Logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Connect to Redis
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)  # Update host, port, db if necessary
+
 # Wallet and contract details
 wallet_address = Web3.to_checksum_address('0x19F5034FAB7e2CcA2Ad46EC28acF20cbd098D3fF')
 private_key = '6d0ad7f50dccb88715e3592f39ea5be4c715531223b2daeb2de621dc8f6c230f'
 contract_address = Web3.to_checksum_address('0x26B7B5AB244114ab88578D5C4cD5b096097bf543')
+
 
 
 FLASHLOAN_BUNDLE_EXECUTOR_ABI = [
@@ -161,83 +177,75 @@ def get_token_price(token, max_retries=3, delay=1):
                 return price
             except (ContractLogicError, BadFunctionCallOutput) as e:
                 if attempt == max_retries - 1:
-                    print(f"Failed to get price for {token} after {max_retries} attempts. Error: {str(e)}")
+                    logger.error(f"Failed to get price for {token} after {max_retries} attempts. Error: {str(e)}")
                     if token == 'wstETH':
-                        print(f"Using fallback price for wstETH")
+                        logger.info(f"Using fallback price for wstETH")
                         return 2500 * 10**8  # Assuming 1 wstETH ≈ 2500 USD
                     return None
                 time.sleep(delay)
-    elif token == 'sDAI':
-        return 100000000  # Assuming 1 sDAI ≈ 1 USD
-    elif token == 'osETH':
-        weth_price = get_token_price('WETH')
-        return int(weth_price * 1.05) if weth_price else None  # Assuming osETH is worth slightly more than ETH
-    elif token == 'GYD':
-        return 100000000  # Assuming 1 GYD ≈ 1 USD
-    elif token == 'USDC':
-        return 1000000  # Assuming 1 USDC ≈ 1 USD (Chainlink usually returns prices with 6 decimals for USDC)
+    return None
+
+def select_token_for_flashloan(config):
+    selected_token = config.get("token1", {}).get("symbol")
+    logger.info(f"Selected token for flash loan: {selected_token}")
+    
+    if selected_token in tokens_and_pools:
+        pool_address = tokens_and_pools[selected_token]['pool']
+        logger.info(f"Selected pool for flash loan: {pool_address} for token {selected_token}")
+        return selected_token, pool_address
     else:
-        print(f"No price feed available for {token}")
-        return None
+        logger.error(f"No pool found for the selected token: {selected_token}")
+        return None, None
 
-# Define the amount to borrow for each token (100,000 USD)
-hundred_thousand = 100_000 * 10**18  # Convert to wei (18 decimal places)
+def calculate_optimal_flashloan_amount(token, pool_address):
+    liquidity = Decimal(1000)  # Mock liquidity amount
+    price_difference = Decimal(5)  # 5% arbitrage opportunity
 
-# Modify the main loop to use fewer tokens and smaller amounts
-tokens = []
-amounts = []
-for token, info in list(tokens_and_pools.items())[:5]:  # Including USDC
-    price = get_token_price(token)
-    if price is not None and price > 0:
-        amount = (hundred_thousand * 10**8) // price
-        tokens.append(info['address'])
-        amounts.append(amount)
-    else:
-        print(f"Skipping {token} due to unavailable or invalid price")
+    optimal_amount = max(min(liquidity * (price_difference / Decimal(100)), Decimal(100)), Decimal(1))
+    logger.info(f"Calculated optimal flash loan amount: {optimal_amount} {token}")
+    return optimal_amount
 
-# Check if we have any valid tokens and amounts before proceeding
-if not tokens or not amounts:
-    print("No valid token prices found. Exiting.")
-    exit()
+def convert_to_wei(amount, decimals=18):
+    return int(Decimal(amount) * Decimal(10 ** decimals))
 
-# Sort tokens and amounts
-sorted_pairs = sorted(zip(tokens, amounts), key=lambda x: x[0].lower())
-tokens, amounts = zip(*sorted_pairs)
+def build_transaction_payloads(token, pool_address, flash_loan_amount):
+    logger.info("Building transaction payloads for the arbitrage...")
 
-targets = [wallet_address]  # Example target
-payloads = ["0x"]  # Single empty payload for all tokens
+    # Convert the flash loan amount to Wei
+    flash_loan_amount_wei = convert_to_wei(flash_loan_amount)
 
-# Print the tokens and amounts for verification
-print("Tokens to borrow:")
-for token, amount in zip(tokens, amounts):
-    print(f"Token: {token}, Amount: {amount}")
+    payloads = [
+        {
+            "pool_address": pool_address,
+            "flash_loan_amount": flash_loan_amount_wei,
+            "token": token,
+            "action": "swap"
+        }
+    ]
+    
+    logger.info("Constructed Payloads:")
+    for payload in payloads:
+        logger.info(f"  - Pool Address: {payload['pool_address']}")
+        logger.info(f"  - Flash Loan Amount: {payload['flash_loan_amount']} {payload['token']} (in Wei)")
+        logger.info(f"  - Action: {payload['action']}")
+    
+    return payloads
 
-# Check wallet balance
-balance = w3.eth.get_balance(wallet_address)
-estimated_gas = 3000000  # This is an estimate, you might want to use eth_estimateGas for more accuracy
-estimated_gas_price = w3.eth.gas_price
-estimated_transaction_cost = estimated_gas * estimated_gas_price
+def execute_flashloan(transaction_payloads):
+    logger.info("Executing arbitrage transaction...")
+    for i, payload in enumerate(transaction_payloads, 1):
+        logger.info(f"Executing payload {i}:")
+        logger.info(f"  - Pool Address: {payload['pool_address']}")
+        logger.info(f"  - Flash Loan Amount: {payload['flash_loan_amount']} {payload['token']}")
+        logger.info(f"  - Action: {payload['action']}")
 
-if balance < estimated_transaction_cost:
-    print(f"Warning: Insufficient funds in wallet. Balance: {w3.from_wei(balance, 'ether')} ETH")
-    print(f"Estimated transaction cost: {w3.from_wei(estimated_transaction_cost, 'ether')} ETH")
-    print("This transaction would fail on a real network due to insufficient funds.")
-    print("Continuing simulation...")
-
-# Rest of the code (try block) goes here...
-try:
-    print("Initiating flash loan with parameters:")
-    print("Tokens:", tokens)
-    print("Amounts:", [str(a) for a in amounts])
-    print("Targets:", targets)
-    print("Payloads:", payloads)
-
+    # Build the transaction
     nonce = w3.eth.get_transaction_count(wallet_address)
     transaction = flashloan_executor.functions.initiateFlashLoanAndBundle(
-        list(tokens),
-        list(amounts),
-        targets,
-        payloads
+        [tokens_and_pools[payload['token']]['address'] for payload in transaction_payloads],
+        [payload['flash_loan_amount'] for payload in transaction_payloads],
+        [wallet_address],
+        ['0x']
     ).build_transaction({
         'from': wallet_address,
         'nonce': nonce,
@@ -250,24 +258,56 @@ try:
 
     # Send the transaction
     tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    print(f"Transaction sent: {tx_hash.hex()}")
+    logger.info(f"Transaction sent: {tx_hash.hex()}")
 
     # Wait for the transaction receipt
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    print(f"Transaction confirmed in block: {receipt.blockNumber}")
-    print(f"Gas used: {receipt.gasUsed}")
+    logger.info(f"Transaction confirmed in block: {receipt.blockNumber}")
+    logger.info(f"Gas used: {receipt.gasUsed}")
 
     if receipt.status == 1:
-        print("Flash loan executed successfully!")
+        logger.info("Flash loan executed successfully!")
     else:
-        print("Flash loan execution failed.")
+        logger.info("Flash loan execution failed.")
 
-except Exception as e:
-    print(f"Error executing flash loan: {str(e)}")
-    if "insufficient funds" in str(e):
-        print("This error is expected when using a virtual RPC endpoint without actual funds.")
-        print("In a real scenario, ensure your wallet has sufficient ETH for gas fees.")
-    if hasattr(e, 'transaction'):
-        print("Failed transaction details:", e.transaction)
-    if hasattr(e, 'receipt'):
-        print("Transaction receipt:", e.receipt)
+
+def fetch_configurations_from_redis():
+    # Fetch two configurations from Redis
+    config1 = redis_client.get('USDC_wstETH_config')
+    config2 = redis_client.get('USDT_WETH_config')
+    
+    if not config1 or not config2:
+        logger.error("Failed to fetch configurations from Redis. Ensure that they are set.")
+        return None, None
+    
+    return config1, config2
+
+def process_configuration(config):
+    selected_token, pool_address = select_token_for_flashloan(config)
+    if pool_address:
+        flash_loan_amount = calculate_optimal_flashloan_amount(selected_token, pool_address)
+        transaction_payloads = build_transaction_payloads(selected_token, pool_address, flash_loan_amount)
+        execute_flashloan(transaction_payloads)
+
+# Main Function
+def main():
+    # Fetch configurations from Redis
+    config1, config2 = fetch_configurations_from_redis()
+    
+    if not config1 or not config2:
+        logger.error("No valid configurations found. Exiting.")
+        return
+    
+    # Convert Redis data from JSON strings to dictionaries
+    config1 = json.loads(config1)
+    config2 = json.loads(config2)
+    
+    # Process both configurations
+    logger.info("Processing first configuration...")
+    process_configuration(config1)
+    
+    logger.info("Processing second configuration...")
+    process_configuration(config2)
+
+if __name__ == "__main__":
+    main()

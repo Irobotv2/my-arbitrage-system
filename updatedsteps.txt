@@ -1,0 +1,118 @@
+2024-09-06 17:00:14,603 - INFO - 33. USDC -> V2(0.30%) -> WETH -> V3(0.05%) -> DAI -> V3(1.00%) -> WETH -> V3(0.30%) -> USDC
+
+What im saying is these lines where it says we are going from USDC in a v2 pool to WETH in a v3 wont work on the network
+
+If we are using the ethereum block chain we can only go from whatever pool were in 
+
+Basically if we input a token and start the arbitrage in a 0.3%fee tier pool we have to get the output of that token from the same fee tier pool.
+
+Example config
+
+lets say the detection comes back and says theres a price difference in this config
+
+onfiguration for USDC-WETH:
+
+2024-09-06 17:05:43,931 - INFO - Token0: USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)
+
+2024-09-06 17:05:43,931 - INFO - Token1: WETH (0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2)
+
+2024-09-06 17:05:43,931 - INFO - Uniswap V2 Pool: 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+
+2024-09-06 17:05:43,931 - INFO - Uniswap V3 Pools:
+
+2024-09-06 17:05:43,931 - INFO -   0.05%: {'address': '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', 'fee': '0.05%'}
+
+2024-09-06 17:05:43,931 - INFO -   0.30%: {'address': '0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8', 'fee': '0.30%'}
+
+2024-09-06 17:05:43,931 - INFO -   1.00%: {'address': '0x7BeA39867e4169DBe237d55C8242a8f2fcDcc387', 'fee': '1.00%'}
+
+2024-09-06 17:05:43,931 - INFO 
+
+Lets say 
+
+the v2 pool is 5% cheaper than the 0.3% uniswapv3 pool
+
+we need to load up the  v2 pool
+
+0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+
+We can use either token to start the arbtirage but if we find the arbitrage is with USDC from detection we should start
+
+with inputing 
+
+024-09-06 17:05:43,931 - INFO - Token0: USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)
+
+Outputting
+
+2024-09-06 17:05:43,931 - INFO - Token1: WETH (0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2)
+
+but remember this is happening in this pool 
+
+0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+
+Then depending on which token we inputted and outputted 
+
+If we inputted USDC we then would need to take the outputted WETH from this pool
+
+but remember this is happening in this pool first
+
+0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+
+and use WETH as the input on the 0.3% pool on uniswapv3
+
+0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8
+
+we would input
+
+0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+
+and output
+
+0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+
+The path goes as follows
+
+the v2 pool is 5% cheaper than the 0.3% uniswapv3 pool
+
+Load the v2 pool
+
+Input 
+
+USDC/;WETH
+
+if we input USDC we have to Output WETH
+
+WE then can take that outputted WETH to the 0.3% uv3 pool
+
+into the uv3 pool and output USDC in that pool.
+
+Path:
+
+1: USDC -> WETH (V2) 
+
+2:WETH->USDC(V3 /0.3%)
+
+I need you to update my pathfinder script to do this exactly and print the paths exactly like this so i can see you understood
+
+Path:
+
+1: USDC -> WETH (V2) 
+
+2:WETH->USDC(V3 /0.3%)
+
+0x addresses of pools:
+
+1:
+
+a input token id:
+
+b output token id:
+
+2:
+
+a input token id:
+
+b output token id:
+
+Remember the token0 and token1 are just the ids.
+
