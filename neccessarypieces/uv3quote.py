@@ -59,4 +59,4 @@ def get_quote(amount_in_usdc):
 
 if __name__ == "__main__":
     # Example usage: Get quote for 1000 USDC
-    get_quote(1000)
+    get_quote(1000000)

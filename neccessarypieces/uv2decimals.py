@@ -70,10 +70,10 @@ def calculate_execution_price(amount_in, token_in, token_out):
 
 # Simulate a trade from USDC to WETH
 def simulate_trade():
-    amount_in_usdc = 1000 * (10 ** USDC_DECIMALS)  # Convert 1000 USDC to its smallest unit
+    amount_in_usdc = 1000000 * (10 ** USDC_DECIMALS)  # Convert 1000 USDC to its smallest unit
     mid_price = calculate_mid_price()
     execution_price = calculate_execution_price(amount_in_usdc, USDC_ADDRESS, WETH_ADDRESS)
-    logging.info(f"Simulated Trade: 1000 USDC -> {execution_price / (10 ** WETH_DECIMALS)} WETH")  # Convert back to human-readable format
+    logging.info(f"Simulated Trade: 1000000 USDC -> {execution_price / (10 ** WETH_DECIMALS)} WETH")  # Convert back to human-readable format
     return execution_price
 
 if __name__ == "__main__":

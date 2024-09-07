@@ -101,9 +101,9 @@ def visualize_pools_and_paths(graph, paths):
     # Highlight paths
     path_edges = set()
     for path in paths[:10]:  # Highlight only the first 10 paths
-        for i in range(len(path) - 1):
-            token1 = path[i].token0.symbol if path[i].token0.address == path[i+1].token0.address or path[i].token0.address == path[i+1].token1.address else path[i].token1.symbol
-            token2 = path[i+1].token0.symbol if path[i+1].token0.address != path[i].token0.address and path[i+1].token0.address != path[i].token1.address else path[i+1].token1.symbol
+        for pool in path:
+            token1 = pool.token0.symbol
+            token2 = pool.token1.symbol
             path_edges.add((token1, token2))
 
     # Draw the graph
@@ -111,7 +111,7 @@ def visualize_pools_and_paths(graph, paths):
     pos = nx.spring_layout(G, k=0.5, iterations=50)
     
     # Draw all edges
-    nx.draw_networkx_edges(G, pos, edge_color=[G[u][v]['color'] for u,v in G.edges()], width=1)
+    nx.draw_networkx_edges(G, pos, edge_color=[G[u][v]['color'] for u, v in G.edges()], width=1)
     
     # Draw highlighted path edges
     nx.draw_networkx_edges(G, pos, edgelist=path_edges, edge_color='red', width=2)

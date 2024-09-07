@@ -1,0 +1,7 @@
+uv3quote.py
+Quote: 1000000 USDC -> 446.710036 WETH
+
+
+uv2decimals.py
+- Simulated Trade: 1000000 USDC -> 438.4159698732965 WETH
+
