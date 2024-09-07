@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Paths Visualization</title>
+    <style>
+        body {
+            background-color: black;
+            color: lime;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            margin: 0;
+        }
+        .log-container {
+            position: absolute;
+            top: 20%;
+            left: 0;
+            width: 100%;
+            height: 80%;
+            overflow-y: scroll;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        .log {
+            margin-bottom: 20px;
+            border: 1px solid lime;
+            padding: 10px;
+        }
+        .matrix {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            color: lime;
+            overflow: hidden;
+            pointer-events: none;
+            z-index: -1;
+        }
+        .char {
+            position: absolute;
+            font-size: 16px;
+            animation: fall infinite linear;
+        }
+        @keyframes fall {
+            0% { transform: translateY(-100%); }
+            100% { transform: translateY(100vh); }
+        }
+        #initial-log {
+            position: absolute;
+            top: 10%;
+            left: 10%;
+            font-size: 18px;
+            color: lime;
+            z-index: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            width: 80%;
+        }
+    </style>
+</head>
+<body>
+    <div class="matrix"></div>
+    <div id="initial-log"></div> <!-- Initial logging message -->
+    <div class="log-container" id="logs"></div>
+
+    <script>
+        function createMatrixEffect() {
+            const matrixContainer = document.querySelector('.matrix');
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            // Create random characters
+            for (let i = 0; i < 200; i++) {
+                const char = document.createElement('div');
+                char.classList.add('char');
+                char.style.left = Math.random() * width + 'px';
+                char.style.animationDuration = (Math.random() * 3 + 2) + 's';
+                char.style.animationDelay = (Math.random() * 5) + 's';
+                char.textContent = String.fromCharCode(Math.floor(Math.random() * 128));
+                matrixContainer.appendChild(char);
+            }
+        }
+
+        function animateLoadingMessage() {
+            const logContainer = document.getElementById('initial-log');
+            const logText = "Executing Ethereum MEV Extraction: Data detection algorithm updating in real time";
+            let dots = '';
+            let i = 0;
+
+            setInterval(() => {
+                dots = '.'.repeat(i % 10);
+                logContainer.textContent = `${logText}${dots}`;
+                i++;
+            }, 300);
+        }
+
+        createMatrixEffect();
+        animateLoadingMessage();  // Show continuous loading log
+
+        async function fetchLogs() {
+            try {
+                const response = await fetch('/data');
+                const logs = await response.json();
+                const logsContainer = document.getElementById('logs');
+                logsContainer.innerHTML = '';
+
+                logs.forEach(log => {
+                    const logDiv = document.createElement('div');
+                    logDiv.className = 'log';
+                    logDiv.innerHTML = `
+                        <strong>Timestamp:</strong> ${log.timestamp}<br>
+                        <strong>Path:</strong> ${log.path.replace(/\n/g, '<br>')}<br>
+                        <strong>Input Amount:</strong> ${log.input_amount.toFixed(6)}<br>
+                        <strong>Output Amount:</strong> ${log.output_amount.toFixed(6)}<br>
+                        <strong>Profit:</strong> ${log.profit.toFixed(6)}<br>
+                        <strong>Profit %:</strong> ${log.profit_percentage.toFixed(2)}%
+                    `;
+                    logsContainer.appendChild(logDiv);
+                });
+
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+            }
+        }
+
+        setInterval(fetchLogs, 3000);  // Fetch logs every 3 seconds
+    </script>
+</body>
+</html>

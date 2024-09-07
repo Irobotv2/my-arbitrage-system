@@ -4,7 +4,6 @@ import logging
 import time
 from collections import defaultdict
 from web3 import Web3
-
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -232,6 +231,18 @@ def log_arbitrage_opportunity(path, input_amount, output_amount):
         log_file.write(f"Profit %: {((output_amount - input_amount) / input_amount) * 100:.2f}%\n")
         log_file.write("-" * 50 + "\n")
 
+def log_path_to_redis(path, input_amount, output_amount, profit, profit_percentage):
+    log_data = {
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'path': format_path(path),
+        'input_amount': input_amount,
+        'output_amount': output_amount,
+        'profit': profit,
+        'profit_percentage': profit_percentage
+    }
+    # Push the log to a Redis list
+    redis_client.lpush('arbitrage_paths', json.dumps(log_data))
+
 def simulate_arbitrage_for_path(path):
     starting_token = path[0][1]
     decimals_starting_token = get_token_decimals(starting_token.address)
@@ -276,8 +287,8 @@ def simulate_arbitrage_for_path(path):
     logging.info(f"Profit %: {profit_percentage:.2f}%")
     logging.info("-" * 50)
 
-    if profit > 0:
-        log_arbitrage_opportunity(path, starting_amount, final_amount_hr)
+    # Log the path to Redis for real-time updates
+    log_path_to_redis(path, starting_amount, final_amount_hr, profit, profit_percentage)
 
 def main():
     graph = load_configurations_from_redis()
