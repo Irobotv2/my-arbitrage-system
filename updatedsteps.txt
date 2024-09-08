@@ -116,3 +116,427 @@ b output token id:
 
 Remember the token0 and token1 are just the ids.
 
+
+
+
+my issue with this code is that the entire thing is just pieces. Ive tested all of them and they all work seperately but now we need to refactor the entire system.
+
+The #DATADETECTIONALGORITHM section loads my configurations from redis so that i can moniotr specific paths for arbitrage. 
+
+
+The #LIQUIDITYVAULTSTOFUNDTHEPATHS has a couple different options of 
+tokens_and_pools = {
+    'WETH': {'address': Web3.to_checksum_address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'), 'pool': Web3.to_checksum_address('0xDACf5Fa19b1f720111609043ac67A9818262850c')},
+    'wstETH': {'address': Web3.to_checksum_address('0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'), 'pool': Web3.to_checksum_address('0x3de27EFa2F1AA663Ae5D458857e731c129069F29')},
+    'AAVE': {'address': Web3.to_checksum_address('0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9'), 'pool': Web3.to_checksum_address('0x3de27EFa2F1AA663Ae5D458857e731c129069F29')},
+    'BAL': {'address': Web3.to_checksum_address('0xba100000625a3754423978a60c9317c58a424e3D'), 'pool': Web3.to_checksum_address('0x5c6Ee304399DBdB9C8Ef030aB642B10820DB8F56')},
+    'rETH': {'address': Web3.to_checksum_address('0xae78736Cd615f374D3085123A210448E74Fc6393'), 'pool': Web3.to_checksum_address('0x1E19CF2D73a72Ef1332C882F20534B6519Be0276')},
+    'sDAI': {'address': Web3.to_checksum_address('0x83F20F44975D03b1b09e64809B757c47f942BEeA'), 'pool': Web3.to_checksum_address('0x2191Df821C198600499aA1f0031b1a7514D7A7D9')},
+    'osETH': {'address': Web3.to_checksum_address('0xf1C9acDc66974dFB6dEcB12aA385b9cD01190E38'), 'pool': Web3.to_checksum_address('0xDACf5Fa19b1f720111609043ac67A9818262850c')},
+    'GYD': {'address': Web3.to_checksum_address('0x1FaE95096322828B3Ef2a8617E1026D80549d8cb'), 'pool': Web3.to_checksum_address('0x2191Df821C198600499aA1f0031b1a7514D7A7D9')},
+    'USDC': {'address': Web3.to_checksum_address('0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606EB48'), 'pool': Web3.to_checksum_address('0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606EB48')},  # Example pool address for USDC
+}
+so we can fund the paths with th initial starting amounts to make sure we have the money to route it
+
+
+
+
+
+#EXECUTETHEWHOLETHING
+def execute_arbitrage(opportunity):
+    """
+    Execute an arbitrage opportunity by crafting and submitting transactions as bundles to builders.
+    """
+    token0_address = opportunity['token0']['address']
+    token1_address = opportunity['token1']['address']
+    v3_pool_info = opportunity['v3_pool']
+    is_v2_to_v3 = opportunity['direction'] == 'v2_to_v3'
+    price_difference = opportunity['price_difference']
+
+    sorted_tokens = sort_tokens(token0_address, token1_address)
+
+    # Check liquidity for V3 pool
+    v3_pool_contract = w3_local.eth.contract(address=v3_pool_info['address'], abi=V3_POOL_ABI)
+    liquidity = v3_pool_contract.functions.liquidity().call()
+    
+    if Decimal(liquidity) / Decimal(10 ** 18) < MIN_LIQUIDITY_THRESHOLD_ETH:
+        main_logger.warning(f"V3 pool {v3_pool_info['address']} has insufficient liquidity. Skipping arbitrage execution.")
+        return
+
+    # Calculate optimal flash loan amount
+    optimal_amount_eth = calculate_optimal_flashloan_amount(v3_pool_info['address'], price_difference)
+    flash_loan_amount = w3_exec.to_wei(optimal_amount_eth, 'ether')
+
+    main_logger.info(f"Executing arbitrage with flash loan amount: {flash_loan_amount} wei")
+    main_logger.info(f"Token0: {token0_address}, Token1: {token1_address}")
+    main_logger.info(f"Sorted tokens: {sorted_tokens}")
+
+    slippage = 0.005  # 0.5% slippage
+    min_amount_out = int(flash_loan_amount * (1 - slippage))
+    deadline = int(time.time()) + 60 * 2  # 2-minute deadline
+
+    # Prepare approval payloads
+    approval_payloads = prepare_approval_payloads(sorted_tokens, flash_loan_amount)
+
+    # Prepare swap payloads
+    swap_payloads, swap_targets = prepare_swap_payloads(is_v2_to_v3, sorted_tokens, flash_loan_amount, min_amount_out, deadline, v3_pool_info)
+
+    # Combine all payloads and targets
+    all_payloads = approval_payloads + swap_payloads
+    all_targets = list(sorted_tokens) + swap_targets
+
+    tokens = list(sorted_tokens)
+    amounts = [flash_loan_amount, flash_loan_amount]
+
+    try:
+        nonce = w3_exec.eth.get_transaction_count(wallet_address)
+        gas_price = w3_exec.eth.gas_price
+
+        # Estimate gas
+        gas_limit = estimate_gas(tokens, amounts, all_targets, all_payloads, nonce)
+
+        tx = build_transaction(tokens, amounts, all_targets, all_payloads, nonce, gas_limit, gas_price)
+        
+        signed_tx = w3_exec.eth.account.sign_transaction(tx, private_key=private_key)
+        tx_hash = w3_exec.eth.send_raw_transaction(signed_tx.rawTransaction)
+        
+        # Log submitted transaction
+        log_submitted_transaction(tx_hash, opportunity, flash_loan_amount)
+
+        # Prepare and send the transaction bundle
+        send_bundle(signed_tx, opportunity)
+
+        # Wait for transaction receipt and log the result
+        receipt = w3_exec.eth.wait_for_transaction_receipt(tx_hash)
+        log_transaction_result(receipt, tx_hash, opportunity, flash_loan_amount)
+
+    except Exception as e:
+        handle_transaction_error(e)
+def prepare_swap_payloads(is_v2_to_v3, sorted_tokens, flash_loan_amount, min_amount_out, deadline, v3_pool_info):
+    if is_v2_to_v3:
+        v2_swap_payload = v2_router_contract.encodeABI(
+            fn_name="swapExactTokensForTokens",
+            args=[flash_loan_amount, min_amount_out, sorted_tokens, FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, deadline]
+        )
+        v3_swap_payload = v3_router_contract.encodeABI(
+            fn_name="exactInputSingle",
+            args=[{
+                'tokenIn': sorted_tokens[1], 'tokenOut': sorted_tokens[0], 'fee': v3_pool_info['fee'],
+                'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, 'deadline': deadline,
+                'amountIn': flash_loan_amount, 'amountOutMinimum': min_amount_out, 'sqrtPriceLimitX96': 0,
+            }]
+        )
+        return [v2_swap_payload, v3_swap_payload], [UNISWAP_V2_ROUTER_ADDRESS, UNISWAP_V3_ROUTER_ADDRESS]
+    else:
+        v3_swap_payload = v3_router_contract.encodeABI(
+            fn_name="exactInputSingle",
+            args=[{
+                'tokenIn': sorted_tokens[0], 'tokenOut': sorted_tokens[1], 'fee': v3_pool_info['fee'],
+                'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, 'deadline': deadline,
+                'amountIn': flash_loan_amount, 'amountOutMinimum': min_amount_out, 'sqrtPriceLimitX96': 0,
+            }]
+        )
+        v2_swap_payload = v2_router_contract.encodeABI(
+            fn_name="swapExactTokensForTokens",
+            args=[flash_loan_amount, min_amount_out, list(reversed(sorted_tokens)), FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS, deadline]
+        )
+        return [v3_swap_payload, v2_swap_payload], [UNISWAP_V3_ROUTER_ADDRESS, UNISWAP_V2_ROUTER_ADDRESS]
+
+def estimate_gas(tokens, amounts, all_targets, all_payloads, nonce):
+    try:
+        gas_estimate = flashloan_contract.functions.initiateFlashLoanAndBundle(
+            tokens, amounts, all_targets, all_payloads
+        ).estimate_gas({'from': wallet_address, 'nonce': nonce})
+        return int(gas_estimate * 1.2)  # Add 20% buffer
+    except Exception as gas_error:
+        main_logger.warning(f"Gas estimation failed: {str(gas_error)}. Using default gas limit.")
+        return 1000000  # Use a higher default gas limit due to complex transaction
+
+def build_transaction(tokens, amounts, all_targets, all_payloads, nonce, gas_limit, gas_price):
+    return flashloan_contract.functions.initiateFlashLoanAndBundle(
+        tokens, amounts, all_targets, all_payloads
+    ).build_transaction({
+        'from': wallet_address,
+        'nonce': nonce,
+        'gas': gas_limit,
+        'gasPrice': gas_price,
+    })
+
+def log_submitted_transaction(tx_hash, opportunity, flash_loan_amount):
+    submitted_logger.info(f"Arbitrage transaction submitted - Hash: {tx_hash.hex()}, Pair: {opportunity['name']}, Type: {'V2 to V3' if opportunity['direction'] == 'v2_to_v3' else 'V3 to V2'}, Amount: {flash_loan_amount}, Fee Tier: {opportunity['v3_pool']['fee']}")
+
+
+def send_bundle(signed_tx, opportunity):
+    transaction_bundle = {
+        "txs": [signed_tx.rawTransaction.hex()],
+        "blockNumber": w3_exec.eth.block_number + 1,
+        "minTimestamp": int(time.time()),
+        "maxTimestamp": int(time.time()) + 60,  # Bundle valid for the next 60 seconds
+        "revertingTxHashes": []
+    }
+    main_logger.info(f"Transaction bundle details: {json.dumps(transaction_bundle, indent=2)}")
+    send_bundle_to_builders(transaction_bundle)
+
+def log_transaction_result(receipt, tx_hash, opportunity, flash_loan_amount):
+    if receipt['status'] == 1:
+        confirmed_logger.info(f"Arbitrage transaction confirmed - Hash: {tx_hash.hex()}, Pair: {opportunity['name']}, Type: {'V2 to V3' if opportunity['direction'] == 'v2_to_v3' else 'V3 to V2'}, Amount: {flash_loan_amount}, Fee Tier: {opportunity['v3_pool']['fee']}, Gas Used: {receipt['gasUsed']}, Effective Gas Price: {receipt['effectiveGasPrice']}")
+        main_logger.info(f"Flashloan transaction mined successfully. Hash: {tx_hash.hex()}")
+    else:
+        main_logger.error(f"Flashloan transaction failed. Hash: {tx_hash.hex()}")
+
+def handle_transaction_error(error):
+    error_message = str(error)
+    if "execution reverted" in error_message:
+        error_data = error_message.split("execution reverted:")[-1].strip()
+        decoded_error = decode_balancer_error(error_data)
+        if "BAL#" in decoded_error:
+            main_logger.error(f"Balancer error detected: {decoded_error}")
+            if "BAL#528" in decoded_error:
+                main_logger.error("Encountered BAL#528 error. This might indicate an issue with the flash loan or token approvals.")
+        else:
+            main_logger.error(f"Execution reverted: {decoded_error}")
+    elif "SafeMath: subtraction overflow" in error_message:
+        main_logger.error(f"Insufficient token balance: {error_message}")
+    elif "UniswapV2Library: INSUFFICIENT_INPUT_AMOUNT" in error_message:
+        main_logger.error(f"Insufficient input amount: {error_message}")
+    else:
+        main_logger.error(f"Error executing flashloan arbitrage: {error_message}", exc_info=True)
+
+def send_bundle_to_builders(bundle):
+    bundle_json = json.dumps(bundle, separators=(',', ':'))
+    message = encode_defunct(text=bundle_json)
+    signed_message = Account.sign_message(message, private_key=private_key)
+    flashbots_signature = f"{wallet_address}:{signed_message.signature.hex()}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Flashbots-Signature": flashbots_signature
+    }
+
+    for url in builder_urls:
+        try:
+            main_logger.info(f"Sending bundle to {url} with payload: {json.dumps(bundle, indent=2)}")
+            response = requests.post(url, json=bundle, headers=headers)
+
+            if response.status_code == 200:
+                main_logger.info(f"Bundle sent successfully to {url}: {response.json()}")
+            else:
+                main_logger.warning(f"Failed to send bundle to {url}: {response.status_code} - {response.text}")
+        except Exception as e:
+            main_logger.error(f"Error sending bundle to {url}: {str(e)}")
+def main():
+    graph = load_configurations_from_redis()
+    paths = generate_arbitrage_paths(graph)
+
+    logging.info(f"Generated {len(paths)} potential arbitrage paths")
+
+    try:
+        while True:
+            for i, path in enumerate(paths, 1):
+                # Check initial profitability with base amount
+                base_amount = 1000
+                profit, profit_percentage = simulate_arbitrage_for_path(path, base_amount)
+
+                if profit is not None and profit > 0:
+                    logging.info(f"Profitable path found with base amount {base_amount}. Finding optimal input amount...")
+                    optimal_amount, max_profit = find_optimal_amount_for_arbitrage(path, min_amount=100, max_amount=5000, step_size=100)
+
+                    # Log the optimal amount and potential profit
+                    log_path_to_redis(path, optimal_amount, optimal_amount + max_profit, max_profit, (max_profit / optimal_amount) * 100)
+
+                    # If a profitable opportunity is found, execute the arbitrage
+                    opportunity = {
+                        'token0': {'address': path[0][1].address},
+                        'token1': {'address': path[1][1].address},
+                        'v3_pool': {'address': path[1][0].address, 'fee': path[1][0].fee},
+                        'direction': 'v2_to_v3' if path[0][0].is_v3 == False and path[1][0].is_v3 == True else 'v3_to_v2',
+                        'price_difference': profit_percentage,
+                        'name': f"{path[0][1].symbol}/{path[1][1].symbol}"
+                    }
+
+                    logging.info(f"Executing arbitrage opportunity for path: {format_path(path)}")
+                    execute_arbitrage(opportunity)
+
+            time.sleep(60)  # Wait for 60 seconds before the next round
+    except KeyboardInterrupt:
+        logging.info("Script stopped by user.")
+
+if __name__ == "__main__":
+    main()
+
+
+The execute whole thing pieces have allowed me to execute on tenderly with my flashloan solidity contract and actually get transaction to happen and get included into blocks live on ethereum.
+
+
+Heres the problem.
+
+What im now aware of with code . We have to be very specific with the way we pass through groups of data and how we have functions call other functions to interpret the data to do other things with in the most basic form of what that is. 
+
+Basically now i need to pass the data detection objects through to all the pieces in the 
+#LIQUIDITYVAULTSTOFUNDTHEPATHS
+
+
+and make sure this function
+def find_optimal_amount_for_arbitrage(path, min_amount, max_amount, step_size):
+    """
+    Finds the optimal input amount for an arbitrage path by simulating different amounts.
+    """
+    optimal_amount = min_amount
+    max_profit = float('-inf')
+
+    for amount in range(min_amount, max_amount + 1, step_size):
+        logging.info(f"Simulating with input amount: {amount}")
+        profit, profit_percentage = simulate_arbitrage_for_path(path, amount)
+
+        if profit is not None and profit > max_profit:
+            max_profit = profit
+            optimal_amount = amount
+
+    logging.info(f"Optimal amount: {optimal_amount} with maximum profit: {max_profit:.6f}")
+    return optimal_amount, max_profit
+
+
+
+
+
+Can pull from the vaults dynamically based on what the path has indenfitied to be profitable. 
+
+
+basically when this profit is identified like this
+Timestamp: 2024-09-06 20:41:11
+Path:
+1: USDC -> WETH (V3/0.05%)
+2: WETH -> USDC (V2)
+Input Amount: 1000.000000 USDC
+Output Amount: 1001.491461 USDC
+Profit: 1.491461 USDC
+Profit %: 0.15%
+--------------------------------
+
+
+
+I need the bot to go to the tokens and pools function and try to pull the input token to start the path.
+
+If we dont have the token to run the path i need you to add this logging 
+"Initial token to run the path is not found or isn't working from tokens_and_pools fucntion"
+This is critical because if the money isnt working dynamically with the paths we wont be able to route in real time.
+
+
+
+
+The next integration i need is when the path is identified and calculated i need it to 
+#EXECUTETHEWHOLETHING
+
+
+and i need the objects defined in the execute arbitrage function to be refactored to pass through the exact configurations in the datadetectionalgo with the new setup. 
+
+
+Basically this system is function in 3 central pieces
+
+the datadetectionalgo
+liquidityvaultsforpaths
+executionthewholething
+
+When ive run integrations of the entire thing before one of the issues ive had is understand when running the entire scaled integration it starts getting a lot hard to identify where the errors are. I need you to be very explicit with what the data detection algorithm is passing to the 
+liquidityvaultsforpaths
+executionthewholething
+
+
+Basically the only thing the liquidity vauilts for paths and execute the whole thing should even be looking at are opportunities the 
+datadetectionalgo
+
+has defined as profitable.
+
+That being said i need logging maybe in a sperate file of how the profitable opportunities are being calculated with the specific numbers
+i also need the exact payload structure in the execute the whole thing
+
+The execute the whole thing should be submitting transactions to the flashbots in A-Z order of the transactions
+basically if the path looks like this
+Path:
+1: USDC -> WETH (V3/0.05%)
+2: WETH -> USDC (V2)
+Input Amount: 1000.000000 USDC
+Output Amount: 1001.491461 USDC
+Profit: 1.491461 USDC
+Profit %: 0.15%
+--------------------
+
+from the data detection algorithm it then needs to try to find the 
+
+optimal amount to run the path
+Profit %: 0.15%
+
+basically if we can make a profit on the path it needs to ask the question,
+for what input amount can we make the make the most amount of profit.
+for example if it runs two simulations 
+1:
+1: USDC -> WETH (V3/0.05%)
+2: WETH -> USDC (V2)
+Input Amount: 2000.000000 USDC
+Output Amount: 2002.491461 USDC
+Profit: 2.491461 USDC
+
+--------------------
+2:
+1: USDC -> WETH (V3/0.05%)
+2: WETH -> USDC (V2)
+Input Amount: 1000.000000 USDC
+Output Amount: 1001.491461 USDC
+Profit: 1.491461 USDC
+
+--------------------
+if it comes back and says the path can execute with 2000 in stead of 1000 i need it to be sent to the execution with the specific amounts of 2000 instead of 1000
+My main concern is our bottom line.
+like how we can optimize making the most amount of profit more so than the % gain.
+If we have to sacrifice % to make more profit im okay with that but we need to test this fully. 
+
+
+Finally we need logging of the exact payload structures being sent to the flashbots.
+
+I need to see the exact inputs and outputs being sent so we can debug that interaction.
+
+
+Maybe do all these interactions in dedicated logging files for debugging?
+Just for the main interactions between 
+
+
+the datadetectionalgo
+liquidityvaultsforpaths
+executionthewholething
+
+
+
+why im doing this:
+
+
+Now in order for the flashbots to work we need the payloads to be constructed like this
+1:
+1: USDC -> WETH (V3/0.05%)
+2: WETH -> USDC (V2)
+Input Amount: 2000.000000 USDC
+Output Amount: 2002.491461 USDC
+Profit: 2.491461 USDC
+
+
+Well use this optimized path as an example to define exactly in the A-Z step the flashbots need to be able to execute the transactions
+This is what a block of transactions looks like in sequential order:
+
+1: Balancer flashloan USDC 2000
+2: USDC -> WETH (V3/0.05%)
+3: WETH -> USDC (V2)
+
+Input Amount: 2000.000000 USDC
+Output Amount: 2002.491461 USDC
+4:Repay 2000USDC back to the balancer Vault
+Profit: 2.491461 USDC
+5:send profit back to my wallet 
+0x6f2F4f0210AC805D817d4CD0b9A4D0c29d232E93
+
+Once we have this e2e system working we will be able to make profits.
+
+Why im working so hard on this:
+I need  this pathing structure to be able to handle hundreds of millions of dollars with the bot basically so i start working on music. I promise that when you get this to work i will do everything i possibly can to change the world with music. I also promise that I will do it in the best way and most moralistic way that I know how. When i get this money im writing this down. 
+
+the first thing i will do is pay my debts.
+I will then start getting all the studio equipment i need 
+Simulatenously while we are scripting i will be researching the best ways to start doing internet marketing.
