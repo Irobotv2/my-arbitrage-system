@@ -8,9 +8,7 @@ from web3 import Web3
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
-import concurrent.futures
-from functools import partial
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 main_logger = logging.getLogger('main')
@@ -298,76 +296,149 @@ def load_configurations_from_redis():
     return graph
 
 
-def generate_arbitrage_paths(graph):
+def generate_complex_arbitrage_paths(graph, max_hops=4, max_paths=1000, min_profit_percentage=0.0001):
     paths = []
+    unique_paths = set()
+    initial_amount = Decimal(1000)  # Assume 1000 units of starting token
+    paths_explored = 0
+
     for start_token_address in graph.tokens.keys():
         start_token = graph.tokens[start_token_address]
-        for first_pool in graph.edges[start_token_address].values():
-            for pool1 in first_pool:
-                other_token = pool1.token1 if pool1.token0.address == start_token_address else pool1.token0
-                for second_pool in graph.edges[other_token.address][start_token_address]:
-                    if pool1 != second_pool:
-                        path = [
-                            (pool1, start_token, other_token),
-                            (second_pool, other_token, start_token)
-                        ]
-                        paths.append(path)
-    data_detection_logger.info(f"Generated {len(paths)} potential arbitrage paths")
+        stack = [(start_token, [], set(), initial_amount)]
+        
+        while stack and len(paths) < max_paths:
+            current_token, current_path, visited, current_amount = stack.pop()
+            paths_explored += 1
+            
+            if len(current_path) > 0:
+                data_detection_logger.debug(f"Exploring path: {format_path(current_path)}")
+                data_detection_logger.debug(f"Current amount: {current_amount}")
+            
+            if len(current_path) > 0 and current_token == start_token:
+                profit_percentage = calculate_path_profit(current_path, initial_amount)
+                data_detection_logger.debug(f"Completed path: {format_path(current_path)}, Profit: {profit_percentage:.4f}%")
+                if profit_percentage >= min_profit_percentage:
+                    path_signature = tuple((p.address, t_in.address, t_out.address) for p, t_in, t_out in current_path)
+                    if path_signature not in unique_paths:
+                        paths.append((current_path, profit_percentage))
+                        unique_paths.add(path_signature)
+                        data_detection_logger.info(f"Found profitable path: {format_path(current_path)}, Profit: {profit_percentage:.4f}%")
+                continue
+            
+            if len(current_path) >= max_hops:
+                continue
+            
+            for next_token_address in graph.edges[current_token.address]:
+                next_token = graph.tokens[next_token_address]
+                if next_token in visited and next_token != start_token:
+                    continue
+                
+                for pool in graph.edges[current_token.address][next_token_address]:
+                    new_amount = estimate_swap_output(current_amount, pool)
+                    data_detection_logger.debug(f"Swap: {current_token.symbol} -> {next_token.symbol}, Amount: {current_amount} -> {new_amount}")
+                    new_path = current_path + [(pool, current_token, next_token)]
+                    new_visited = visited.union({next_token})
+                    
+                    # Early pruning: if the path is already unprofitable, don't explore further
+                    if new_amount / initial_amount < Decimal('1.00001'):  # 0.001% profit threshold
+                        data_detection_logger.debug(f"Pruning path due to low profitability: {format_path(new_path)}")
+                        continue
+                    
+                    stack.append((next_token, new_path, new_visited, new_amount))
+    
+    # Sort paths by profit percentage in descending order
+    paths.sort(key=lambda x: x[1], reverse=True)
+    
+    data_detection_logger.info(f"Explored {paths_explored} paths, found {len(paths)} potential arbitrage paths")
     return paths
 
-def simulate_mev_competition(path, amount, profit):
-    # Convert 0.01 to a Decimal type
-    baseline = Decimal('0.01')
+def estimate_swap_output(amount_in, pool):
+    if pool.is_v3:
+        fee = Decimal(pool.fee) / Decimal(1000000)
+        return amount_in * (Decimal(1) - fee)
+    else:
+        fee = Decimal('0.003')  # 0.3% fee for V2
+        return amount_in * (Decimal(1) - fee)
 
-    # Simulate probability of winning based on profit and amount
-    win_probability = min(1, profit / (amount * baseline))  # Example: 1% of trade amount as baseline
-
-    # Simulate market impact using a Decimal type
-    market_impact = amount * Decimal('0.0005')  # Example: 0.05% market impact
-
-    adjusted_profit = profit - market_impact
-
-    return adjusted_profit, win_probability
-
+def calculate_path_profit(path, initial_amount):
+    amount = Decimal(initial_amount)
+    for pool, _, _ in path:
+        amount = estimate_swap_output(amount, pool)
+    return (amount / Decimal(initial_amount) - Decimal(1)) * Decimal(100)
 def simulate_arbitrage_for_path(path, starting_amount):
     data_detection_logger.info(f"Simulating arbitrage for path: {format_path(path)}")
     starting_token = path[0][1]
     decimals_starting_token = get_token_decimals(starting_token.address)
     amount = Decimal(starting_amount) * Decimal(10 ** decimals_starting_token)
 
-    # Estimate gas cost (this is a rough estimate and should be refined)
-    estimated_gas = 300000  # Example gas limit
-    gas_price = w3.eth.gas_price
-    estimated_gas_cost = Decimal(estimated_gas * gas_price) / Decimal(10 ** 18)  # Convert to ETH
-
     for pool, token_in, token_out in path:
         if not pool.is_v3:
             pair_contract = w3.eth.contract(address=pool.address, abi=UNISWAP_V2_PAIR_ABI)
             amount = calculate_execution_price(amount, token_in.address, token_out.address, pair_contract)
-            # Apply Uniswap V2 fee (0.3%)
-            amount = amount * Decimal('0.997')
         else:
             amount = get_quote(token_in.address, token_out.address, amount, pool.fee)
-            # V3 fee is already accounted for in the quote
 
         if amount is None:
             data_detection_logger.error(f"Failed to get amount out for swap {token_in.symbol} -> {token_out.symbol}. Aborting path simulation.")
-            return None, None, None
+            return None, None
 
     final_amount_hr = Decimal(amount) / Decimal(10 ** decimals_starting_token)
-    profit = final_amount_hr - Decimal(starting_amount) - estimated_gas_cost
+    profit = final_amount_hr - Decimal(starting_amount)
     profit_percentage = (profit / Decimal(starting_amount)) * Decimal(100)
 
-    # Adjust profit to account for MEV competition and other factors
-    adjusted_profit, win_probability = simulate_mev_competition(path, starting_amount, profit)
+    data_detection_logger.info(f"Simulation results:")
+    data_detection_logger.info(f"Input Amount: {starting_amount:.6f} {starting_token.symbol}")
+    data_detection_logger.info(f"Output Amount: {final_amount_hr:.6f} {starting_token.symbol}")
+    data_detection_logger.info(f"Profit: {profit:.6f} {starting_token.symbol}")
+    data_detection_logger.info(f"Profit %: {profit_percentage:.2f}%")
 
-    data_detection_logger.info(f"Adjusted Profit: {adjusted_profit:.6f} {starting_token.symbol}")
-    data_detection_logger.info(f"Win Probability: {win_probability:.2%}")
+    return profit, profit_percentage
 
-    return adjusted_profit, profit_percentage, win_probability
-
-
-
+def prepare_opportunity(path, profit_percentage):
+    return {
+        'token0': {'address': path[0][1].address},
+        'token1': {'address': path[-1][2].address},
+        'v3_pool': {'address': next(p.address for p in path if p[0].is_v3), 'fee': next(p[0].fee for p in path if p[0].is_v3)},
+        'direction': 'complex',
+        'price_difference': profit_percentage,
+        'name': f"{path[0][1].symbol}/{path[-1][2].symbol}"
+    }
+def prepare_complex_swap_payloads(path, flash_loan_amount, min_amount_out, deadline):
+    payloads = []
+    targets = []
+    
+    for i, (pool, token_in, token_out) in enumerate(path):
+        if pool.is_v3:
+            payload = v3_router_contract.encodeABI(
+                fn_name="exactInputSingle",
+                args=[{
+                    'tokenIn': token_in.address,
+                    'tokenOut': token_out.address,
+                    'fee': pool.fee,
+                    'recipient': FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS if i == len(path) - 1 else v3_router_contract.address,
+                    'deadline': deadline,
+                    'amountIn': flash_loan_amount if i == 0 else 0,  # Use all for first swap, 0 for others (will use all received from previous swap)
+                    'amountOutMinimum': min_amount_out if i == len(path) - 1 else 0,
+                    'sqrtPriceLimitX96': 0,
+                }]
+            )
+            targets.append(UNISWAP_V3_ROUTER_ADDRESS)
+        else:
+            payload = v2_router_contract.encodeABI(
+                fn_name="swapExactTokensForTokens",
+                args=[
+                    flash_loan_amount if i == 0 else 0,
+                    min_amount_out if i == len(path) - 1 else 0,
+                    [token_in.address, token_out.address],
+                    FLASHLOAN_BUNDLE_EXECUTOR_ADDRESS if i == len(path) - 1 else v2_router_contract.address,
+                    deadline
+                ]
+            )
+            targets.append(UNISWAP_V2_ROUTER_ADDRESS)
+        
+        payloads.append(payload)
+    
+    return payloads, targets
 def find_optimal_amount_for_arbitrage(path, min_amount, max_amount, step_size):
     data_detection_logger.info(f"Finding optimal amount for arbitrage path: {format_path(path)}")
     optimal_amount = min_amount
@@ -375,7 +446,7 @@ def find_optimal_amount_for_arbitrage(path, min_amount, max_amount, step_size):
 
     for amount in range(min_amount, max_amount + 1, step_size):
         data_detection_logger.info(f"Simulating with input amount: {amount}")
-        profit, profit_percentage, win_probability = simulate_arbitrage_for_path(path, amount)
+        profit, profit_percentage = simulate_arbitrage_for_path(path, amount)
 
         if profit is not None and profit > max_profit:
             max_profit = profit
@@ -383,6 +454,7 @@ def find_optimal_amount_for_arbitrage(path, min_amount, max_amount, step_size):
 
     data_detection_logger.info(f"Optimal amount: {optimal_amount} with maximum profit: {max_profit:.6f}")
     return optimal_amount, max_profit
+
 # Liquidity Vaults Functions
 def get_token_decimals(token_address):
     return TOKEN_DECIMALS.get(token_address.lower(), 18)
@@ -395,109 +467,41 @@ def get_initial_token_for_path(path):
     else:
         liquidity_vault_logger.error(f"Initial token {initial_token.symbol} to run the path is not found in tokens_and_pools function")
         return None
-def track_failed_transaction(tx_hash, error):
-    failed_tx = {
-        'tx_hash': tx_hash.hex(),
-        'error': str(error),
-        'timestamp': int(time.time()),
-    }
-    redis_client.lpush('failed_transactions', json.dumps(failed_tx))
-    execution_logger.error(f"Transaction failed: {failed_tx}")
 
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def send_transaction_with_retry(tx, private_key):
-    signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    return tx_hash
-
-def analyze_execution_results(expected_profit, actual_profit, gas_used, effective_gas_price):
-    analysis = {
-        'expected_profit': expected_profit,
-        'actual_profit': actual_profit,
-        'profit_difference': actual_profit - expected_profit,
-        'gas_used': gas_used,
-        'effective_gas_price': effective_gas_price,
-        'gas_cost': gas_used * effective_gas_price,
-    }
-    
-    execution_logger.info("Execution Analysis:")
-    for key, value in analysis.items():
-        execution_logger.info(f"{key}: {value}")
-
-    # Store analysis in Redis for further study
-    redis_client.lpush('execution_analyses', json.dumps(analysis))
-    return analysis
-def send_bundle(tx_hash, opportunity):
-    base_fee = w3.eth.get_block('latest')['baseFeePerGas']
-    priority_fee = w3.eth.max_priority_fee
-
-    transaction_bundle = {
-        "txs": [tx_hash],
-        "blockNumber": w3.eth.block_number + 1,
-        "minTimestamp": int(time.time()),
-        "maxTimestamp": int(time.time()) + 60,
-        "revertingTxHashes": [],
-        "stateBlockNumber": w3.eth.block_number,
-        "preferences": {
-            "fast": True,
-            "privacy": True,
-        },
-        "inclusion": {
-            "block": w3.eth.block_number + 1,
-            "maxBlock": w3.eth.block_number + 2,
-        },
-        "pricing": {
-            "baseFee": {
-                "max": str(base_fee * 2),  # Willing to pay up to 2x current base fee
-            },
-            "priorityFee": {
-                "max": str(priority_fee * 1.5),  # Willing to pay up to 1.5x current priority fee
-            },
-        },
-    }
-
-    # Send the bundle to builders
-    send_bundle_to_builders(transaction_bundle)
-
-def process_arbitrage_path(path, min_amount, max_amount, step_size):
-    data_detection_logger.info(f"Processing path: {format_path(path)}")
-    optimal_amount, expected_profit = find_optimal_amount_for_arbitrage(path, min_amount, max_amount, step_size)
-    
-    if expected_profit > 0:
-        # Simulate again with the optimal amount to get the win probability
-        _, _, win_probability = simulate_arbitrage_for_path(path, optimal_amount)
-        opportunity = {
-            'path': path,
-            'optimal_amount': optimal_amount,
-            'expected_profit': expected_profit,
-            'win_probability': win_probability
-        }
-        data_detection_logger.info(f"Profitable opportunity found: {opportunity}")
-        log_path_details(path, optimal_amount)
-        return opportunity
-    return None
 # Execution Functions
 def execute_arbitrage(opportunity, optimal_amount):
+    execution_logger.info(f"Executing arbitrage for opportunity: {opportunity}")
+    
+    # ... (keep existing liquidity check)
+
+    flash_loan_amount = w3.to_wei(optimal_amount, 'ether')
+    
+    execution_logger.info(f"Executing arbitrage with flash loan amount: {flash_loan_amount} wei")
+
+    slippage = 0.005  # 0.5% slippage
+    min_amount_out = int(flash_loan_amount * (1 - slippage))
+    deadline = int(time.time()) + 60 * 2  # 2-minute deadline
+
+    # Prepare swap payloads for each hop in the path
+    swap_payloads, swap_targets = prepare_complex_swap_payloads(opportunity['path'], flash_loan_amount, min_amount_out, deadline)
     execution_logger.info(f"Executing arbitrage for opportunity: {opportunity}")
     token0_address = opportunity['token0']['address']
     token1_address = opportunity['token1']['address']
     v3_pool_info = opportunity['v3_pool']
     is_v2_to_v3 = opportunity['direction'] == 'v2_to_v3'
-
+    
     sorted_tokens = sort_tokens(token0_address, token1_address)
-
+    
     # Check liquidity for V3 pool
     v3_pool_contract = w3.eth.contract(address=v3_pool_info['address'], abi=V3_POOL_ABI)
     liquidity = v3_pool_contract.functions.liquidity().call()
-
+    
     if Decimal(liquidity) / Decimal(10 ** 18) < Decimal('0.1'):  # Assuming 0.1 ETH as MIN_LIQUIDITY_THRESHOLD_ETH
         execution_logger.warning(f"V3 pool {v3_pool_info['address']} has insufficient liquidity. Skipping arbitrage execution.")
         return
 
     flash_loan_amount = w3.to_wei(optimal_amount, 'ether')
-
+    
     execution_logger.info(f"Executing arbitrage with flash loan amount: {flash_loan_amount} wei")
     execution_logger.info(f"Token0: {token0_address}, Token1: {token1_address}")
     execution_logger.info(f"Sorted tokens: {sorted_tokens}")
@@ -520,92 +524,29 @@ def execute_arbitrage(opportunity, optimal_amount):
     amounts = [flash_loan_amount, flash_loan_amount]
 
     try:
-        # Get initial balances
-        initial_eth_balance = w3.eth.get_balance(wallet_address)
-        initial_token_balances = {
-            token: w3.eth.contract(address=token, abi=ERC20_ABI).functions.balanceOf(wallet_address).call()
-            for token in sorted_tokens
-        }
-
         nonce = w3.eth.get_transaction_count(wallet_address)
         gas_price = w3.eth.gas_price
 
         # Estimate gas
         gas_limit = estimate_gas(tokens, amounts, all_targets, all_payloads, nonce)
-        estimated_gas_cost = gas_limit * gas_price
-
-        execution_logger.info(f"Estimated gas cost: {w3.from_wei(estimated_gas_cost, 'ether')} ETH")
 
         tx = build_transaction(tokens, amounts, all_targets, all_payloads, nonce, gas_limit, gas_price)
-
-        # Send transaction with retry
-        tx_hash = send_transaction_with_retry(tx, private_key)
+        
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         
         # Log submitted transaction
         log_submitted_transaction(tx_hash, opportunity, flash_loan_amount)
 
         # Prepare and send the transaction bundle
-        send_bundle(tx_hash, opportunity)
+        send_bundle(signed_tx, opportunity)
 
         # Wait for transaction receipt and log the result
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-
-        if receipt['status'] == 1:
-            # Transaction successful
-            final_eth_balance = w3.eth.get_balance(wallet_address)
-            final_token_balances = {
-                token: w3.eth.contract(address=token, abi=ERC20_ABI).functions.balanceOf(wallet_address).call()
-                for token in sorted_tokens
-            }
-
-            actual_gas_cost = receipt['gasUsed'] * receipt['effectiveGasPrice']
-            eth_profit = final_eth_balance - initial_eth_balance + actual_gas_cost
-
-            token_profits = {
-                token: final_token_balances[token] - initial_token_balances[token]
-                for token in sorted_tokens
-            }
-
-            execution_logger.info(f"Arbitrage transaction successful - Hash: {tx_hash.hex()}")
-            execution_logger.info(f"Actual gas cost: {w3.from_wei(actual_gas_cost, 'ether')} ETH")
-            execution_logger.info(f"ETH profit: {w3.from_wei(eth_profit, 'ether')} ETH")
-            for token, profit in token_profits.items():
-                token_contract = w3.eth.contract(address=token, abi=ERC20_ABI)
-                token_symbol = token_contract.functions.symbol().call()
-                token_decimals = token_contract.functions.decimals().call()
-                profit_formatted = profit / (10 ** token_decimals)
-                execution_logger.info(f"{token_symbol} profit: {profit_formatted}")
-
-            # Update profit tracker
-            update_profit_tracker(eth_profit, token_profits)
-
-            # Perform post-execution analysis
-            expected_profit = opportunity.get('expected_profit', 0)
-            actual_profit = eth_profit
-            analyze_execution_results(expected_profit, actual_profit, receipt['gasUsed'], receipt['effectiveGasPrice'])
-
-        else:
-            execution_logger.error(f"Arbitrage transaction failed - Hash: {tx_hash.hex()}")
+        log_transaction_result(receipt, tx_hash, opportunity, flash_loan_amount)
 
     except Exception as e:
-        track_failed_transaction(tx_hash, e)
-
-
-def update_profit_tracker(eth_profit, token_profits):
-    try:
-        current_profits = json.loads(redis_client.get('total_realized_profits') or '{}')
-        
-        # Update ETH profit
-        current_profits['ETH'] = current_profits.get('ETH', 0) + eth_profit
-
-        # Update token profits
-        for token, profit in token_profits.items():
-            current_profits[token] = current_profits.get(token, 0) + profit
-
-        redis_client.set('total_realized_profits', json.dumps(current_profits))
-        execution_logger.info(f"Updated total realized profits: {current_profits}")
-    except Exception as e:
-        execution_logger.error(f"Error updating profit tracker: {str(e)}", exc_info=True)
+        handle_transaction_error(e)
 
 def prepare_approval_payloads(sorted_tokens, flash_loan_amount):
     return [
@@ -721,7 +662,6 @@ def send_bundle_to_builders(bundle):
         except Exception as e:
             execution_logger.error(f"Error sending bundle to {url}: {str(e)}")
 
-
 # Utility Functions
 def sort_tokens(token0, token1):
     return sorted([token0, token1])
@@ -732,7 +672,6 @@ def format_path(path):
         pool_type = "V2" if not pool.is_v3 else f"V3/{pool.fee/10000:.2f}%"
         result.append(f"{i}: {token_in.symbol} -> {token_out.symbol} ({pool_type})")
     return "\n".join(result)
-
 
 def get_quote(token_in, token_out, amount_in, fee_tier):
     try:
@@ -748,7 +687,6 @@ def get_quote(token_in, token_out, amount_in, fee_tier):
         execution_logger.error(f"Error fetching quote for {token_in} -> {token_out} with amount {amount_in}: {e}")
         return None
 
-
 def calculate_execution_price(amount_in, token_in, token_out, pair_contract):
     token0_address = pair_contract.functions.token0().call()
     token1_address = pair_contract.functions.token1().call()
@@ -760,18 +698,14 @@ def calculate_execution_price(amount_in, token_in, token_out, pair_contract):
 
     decimals_in = get_token_decimals(token_in)
     decimals_out = get_token_decimals(token_out)
-    amount_in_human = Decimal(amount_in) / Decimal(10 ** decimals_in)
-
-    # Convert reserves to Decimal
-    reserve0 = Decimal(str(reserve0))
-    reserve1 = Decimal(str(reserve1))
+    amount_in_human = amount_in / (10 ** decimals_in)
 
     if token_in == token0_address:
         amount_out = (amount_in_human * reserve1) / (reserve0 + amount_in_human)
     else:
         amount_out = (amount_in_human * reserve0) / (reserve1 + amount_in_human)
 
-    amount_out = amount_out * Decimal(10 ** decimals_out)
+    amount_out = amount_out * (10 ** decimals_out)
     
     execution_logger.info(f"Execution Price: {amount_in_human} {token_in} -> {amount_out} {token_out}")
     return amount_out
@@ -781,8 +715,8 @@ def get_reserves(pair_contract, token0_address, token1_address):
         reserves = pair_contract.functions.getReserves().call()
         decimals0 = get_token_decimals(token0_address)
         decimals1 = get_token_decimals(token1_address)
-        reserve0 = Decimal(reserves[0]) / Decimal(10 ** decimals0)
-        reserve1 = Decimal(reserves[1]) / Decimal(10 ** decimals1)
+        reserve0 = reserves[0] / (10 ** decimals0)
+        reserve1 = reserves[1] / (10 ** decimals1)
         return reserve0, reserve1
     except Exception as e:
         execution_logger.error(f"Error fetching reserves: {e}")
@@ -803,86 +737,52 @@ def push_to_redis(log_data):
     except Exception as e:
         main_logger.error(f"Error pushing data to Redis: {str(e)}")
 
-def run_data_detection_report(duration_minutes=60):
-    start_time = time.time()
-    end_time = start_time + (duration_minutes * 60)
-    
-    graph = load_configurations_from_redis()
-    paths = generate_arbitrage_paths(graph)
 
-    total_paths_checked = 0
-    profitable_paths = 0
-    total_profit = 0
-    max_profit_percentage = 0
-    profit_distribution = defaultdict(int)
-
-    main_logger.info(f"Starting data detection performance report for {duration_minutes} minutes")
-
-    while time.time() < end_time:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            process_path = partial(process_arbitrage_path, min_amount=1000, max_amount=10000, step_size=1000)
-            results = list(executor.map(process_path, paths))
-        
-        for result in results:
-            total_paths_checked += 1
-            if result is not None:
-                profitable_paths += 1
-                total_profit += result['expected_profit']
-                profit_percentage = (result['expected_profit'] / result['optimal_amount']) * 100
-                max_profit_percentage = max(max_profit_percentage, profit_percentage)
-                
-                # Categorize profit percentages
-                if profit_percentage < 1:
-                    profit_distribution['0-1%'] += 1
-                elif profit_percentage < 2:
-                    profit_distribution['1-2%'] += 1
-                elif profit_percentage < 5:
-                    profit_distribution['2-5%'] += 1
-                else:
-                    profit_distribution['5%+'] += 1
-
-        time.sleep(10)  # Wait for 10 seconds before the next round
-
-    # Prepare the report
-    report = {
-        'duration_minutes': duration_minutes,
-        'total_paths_checked': total_paths_checked,
-        'profitable_paths': profitable_paths,
-        'total_profit': float(total_profit),
-        'average_profit': float(total_profit / profitable_paths) if profitable_paths > 0 else 0,
-        'max_profit_percentage': float(max_profit_percentage),
-        'profit_distribution': dict(profit_distribution)
-    }
-
-    # Save report to Redis
-    redis_client.set('data_detection_report', json.dumps(report))
-    main_logger.info("Performance report saved to Redis")
-
-    return report
-def log_path_details(path, optimal_amount):
-    data_detection_logger.info(f"Path details for optimal amount {optimal_amount}:")
-    amount = optimal_amount
-    for i, (pool, token_in, token_out) in enumerate(path):
-        if not pool.is_v3:
-            pair_contract = w3.eth.contract(address=pool.address, abi=UNISWAP_V2_PAIR_ABI)
-            amount_out = calculate_execution_price(amount, token_in.address, token_out.address, pair_contract)
-            amount_out = amount_out * Decimal('0.997')  # Apply Uniswap V2 fee
-        else:
-            amount_out = get_quote(token_in.address, token_out.address, amount, pool.fee)
-        
-        data_detection_logger.info(f"  Swap {i+1}: {amount} {token_in.symbol} -> {amount_out} {token_out.symbol}")
-        amount = amount_out
 # Main function
 def main():
+    graph = load_configurations_from_redis()
+    paths = generate_complex_arbitrage_paths(graph, min_profit_percentage=0.0001)  # 0.01% minimum profit
+
+    main_logger.info(f"Generated {len(paths)} potential complex arbitrage paths")
+
+    # Display the first 10 profitable paths (or all if less than 10)
+    for i, (path, profit_percentage) in enumerate(paths[:10]):
+        main_logger.info(f"Path {i+1}:")
+        main_logger.info(format_path(path))
+        main_logger.info(f"Estimated profit: {profit_percentage:.4f}%")
+        main_logger.info("---")
+
+    if not paths:
+        main_logger.warning("No profitable paths found. Consider adjusting the minimum profit percentage or checking market conditions.")
+
     try:
-        # Run the data detection report for 60 minutes
-        report = run_data_detection_report(duration_minutes=60)
-        
-        # Log the report
-        main_logger.info("Data Detection Performance Report:")
-        main_logger.info(json.dumps(report, indent=2))
-        
+        while True:
+            for path, profit_percentage in paths:
+                if profit_percentage >= 0.5:  # 0.5% execution threshold
+                    main_logger.info(f"Potentially executable path found. Profit %: {profit_percentage:.2f}%")
+                    main_logger.info(f"Path: {format_path(path)}")
+
+                    # Find optimal amount
+                    optimal_amount, max_profit = find_optimal_amount_for_arbitrage(path, min_amount=100, max_amount=5000, step_size=100)
+
+                    main_logger.info(f"Optimal amount: {optimal_amount}, Max profit: {max_profit}")
+
+                    # Prepare log data
+                    log_data = {
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'path': format_path(path),
+                        'input_amount': optimal_amount,
+                        'profit_percentage': profit_percentage
+                    }
+                    push_to_redis(log_data)
+
+                    # Prepare and execute the arbitrage
+                    opportunity = prepare_opportunity(path, profit_percentage)
+                    execute_arbitrage(opportunity, optimal_amount)
+
+            time.sleep(20)  # Wait before next round
     except KeyboardInterrupt:
         main_logger.info("Script stopped by user.")
+
 if __name__ == "__main__":
     main()

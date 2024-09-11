@@ -540,3 +540,6 @@ I need  this pathing structure to be able to handle hundreds of millions of doll
 the first thing i will do is pay my debts.
 I will then start getting all the studio equipment i need 
 Simulatenously while we are scripting i will be researching the best ways to start doing internet marketing.
+
+
+Certainly! I understand you want to isolate the complex arbitrage path creation while maintaining compatibility with the current script's format. This will allow you to test the new path generation with your existing configuration loading process before fully integrating it back into the main script.
