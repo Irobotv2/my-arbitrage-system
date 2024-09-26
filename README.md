@@ -24,8 +24,8 @@ This project implements an advanced arbitrage detection and execution system for
 ## Setup
 
 1. Clone the repository:
-git clone https://github.com/yourusername/ethereum-multi-pair-arbitrage-bot.git
-cd ethereum-multi-pair-arbitrage-bot
+git clone https://github.com/yourusername/my-arbitrage-system.git
+cd my-arbitrage-system
 Copy
 2. Install dependencies:
 pip install -r requirements.txt
